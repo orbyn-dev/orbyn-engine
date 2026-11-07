@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "about": "Shared inputs and expected results for task status: reading records, lane moves, field merges, the repeat reset and the .ics mapping. The engine's tests/task_status.rs and the planner's web tests both run this file.",
+  "reading": [
+    {
+      "name": "a record with no status reads as todo and has nothing to write",
+      "fields": {},
+      "status": "todo",
+      "lane": "todo"
+    },
+    { "name": "todo", "fields": { "status": "todo" }, "status": "todo", "lane": "todo" },
+    { "name": "in progress", "fields": { "status": "in_progress" }, "status": "in_progress", "lane": "in_progress" },
+    { "name": "blocked", "fields": { "status": "blocked" }, "status": "blocked", "lane": "blocked" },
+    { "name": "a null status reads as todo", "fields": { "status": null }, "status": "todo", "lane": "todo" },
+    {
+      "name": "a status a newer client added shows as todo and is kept as it was",
+      "fields": { "status": "waiting_on_review" },
+      "status": "waiting_on_review",
+      "lane": "todo"
+    },
+    {
+      "name": "done wins over the status, which stays",
+      "fields": { "status": "blocked", "done_at": "2026-11-08T09:00:00Z" },
+      "status": "blocked",
+      "lane": "done"
+    },
+    {
+      "name": "done with no status is done",
+      "fields": { "done_at": "2026-11-08T09:00:00Z" },
+      "status": "todo",
+      "lane": "done"
+    }
+  ],
+  "moves": [
+    { "name": "todo to in progress writes only the status", "from": { "status": "todo", "done": false }, "to": "in_progress", "expect": { "status": "in_progress", "done": false } },
+    { "name": "in progress to blocked", "from": { "status": "in_progress", "done": false }, "to": "blocked", "expect": { "status": "blocked", "done": false } },
+    { "name": "blocked back to todo", "from": { "status": "blocked", "done": false }, "to": "todo", "expect": { "status": "todo", "done": false } },
+    { "name": "to done keeps the status", "from": { "status": "blocked", "done": false }, "to": "done", "expect": { "status": "blocked", "done": true } },
+    { "name": "to done from in progress keeps in progress", "from": { "status": "in_progress", "done": false }, "to": "done", "expect": { "status": "in_progress", "done": true } },
+    { "name": "out of done takes the lane's status", "from": { "status": "blocked", "done": true }, "to": "in_progress", "expect": { "status": "in_progress", "done": false } },
+    { "name": "out of done to todo", "from": { "status": "blocked", "done": true }, "to": "todo", "expect": { "status": "todo", "done": false } },
+    { "name": "a move to the lane it is in changes nothing", "from": { "status": "blocked", "done": false }, "to": "blocked", "expect": { "status": "blocked", "done": false } },
+    { "name": "an unknown status stays when the task is moved to the lane it shows in", "from": { "status": "waiting_on_review", "done": false }, "to": "todo", "expect": { "status": "waiting_on_review", "done": false } },
+    { "name": "an unknown status is replaced when the person moves the task", "from": { "status": "waiting_on_review", "done": false }, "to": "blocked", "expect": { "status": "blocked", "done": false } },
+    { "name": "an unknown status stays through done and is not rewritten", "from": { "status": "waiting_on_review", "done": false }, "to": "done", "expect": { "status": "waiting_on_review", "done": true } }
+  ],
+  "undo": [
+    { "name": "undo restores status, done and done_at in one write", "before": { "status": "blocked", "done": true }, "moved_to": "in_progress", "after_undo": { "status": "blocked", "done": true } },
+    { "name": "undo of a move between open lanes", "before": { "status": "todo", "done": false }, "moved_to": "blocked", "after_undo": { "status": "todo", "done": false } }
+  ],
+  "merge": [
+    {
+      "name": "one device completes while another sets blocked: both stay, the card is done, reopening brings blocked back",
+      "base": { "status": "todo" },
+      "writes": [
+        { "device": 1, "millis": 100, "set": { "done_at": "2026-11-08T09:00:00Z" } },
+        { "device": 2, "millis": 101, "set": { "status": "blocked" } }
+      ],
+      "expect": { "status": "blocked", "done": true, "lane": "done" },
+      "then": [
+        { "device": 1, "millis": 200, "set": { "done_at": null } }
+      ],
+      "expect_after": { "status": "blocked", "done": false, "lane": "blocked" }
+    },
+    {
+      "name": "two devices set different statuses: the later stamp wins",
+      "base": { "status": "todo" },
+      "writes": [
+        { "device": 1, "millis": 100, "set": { "status": "in_progress" } },
+        { "device": 2, "millis": 101, "set": { "status": "blocked" } }
+      ],
+      "expect": { "status": "blocked", "done": false, "lane": "blocked" }
+    },
+    {
+      "name": "the same millisecond: the higher device id wins, on every device",
+      "base": { "status": "todo" },
+      "writes": [
+        { "device": 1, "millis": 100, "set": { "status": "in_progress" } },
+        { "device": 2, "millis": 100, "set": { "status": "blocked" } }
+      ],
+      "expect": { "status": "blocked", "done": false, "lane": "blocked" }
+    },
+    {
+      "name": "a status change does not touch done_at, and done does not touch status",
+      "base": { "status": "in_progress", "done_at": "2026-11-08T09:00:00Z" },
+      "writes": [
+        { "device": 2, "millis": 101, "set": { "status": "blocked" } }
+      ],
+      "expect": { "status": "blocked", "done": true, "lane": "done" }
+    },
+    {
+      "name": "a move out of done writes done_at null and the status together",
+      "base": { "status": "blocked", "done_at": "2026-11-08T09:00:00Z" },
+      "writes": [
+        { "device": 1, "millis": 101, "set": { "done_at": null, "status": "in_progress" } }
+      ],
+      "expect": { "status": "in_progress", "done": false, "lane": "in_progress" }
+    },
+    {
+      "name": "an unknown status survives a merge of other fields",
+      "base": { "status": "waiting_on_review" },
+      "writes": [
+        { "device": 1, "millis": 101, "set": { "priority": "high" } }
+      ],
+      "expect": { "status": "waiting_on_review", "done": false, "lane": "todo" }
+    }
+  ],
+  "repeat": [
+    {
+      "name": "completing an occurrence moves to the next one and starts it as todo, in the same write",
+      "before": { "status": "blocked" },
+      "expect": { "status": "todo", "done": false }
+    },
+    {
+      "name": "an in progress occurrence starts the next one as todo too",
+      "before": { "status": "in_progress" },
+      "expect": { "status": "todo", "done": false }
+    }
+  ],
+  "ics": [
+    { "name": "todo", "status": "todo", "done": false, "STATUS": "NEEDS-ACTION", "X-ORBYN-STATUS": null },
+    { "name": "in progress", "status": "in_progress", "done": false, "STATUS": "IN-PROCESS", "X-ORBYN-STATUS": null },
+    { "name": "blocked", "status": "blocked", "done": false, "STATUS": "NEEDS-ACTION", "X-ORBYN-STATUS": "BLOCKED" },
+    { "name": "done", "status": "todo", "done": true, "STATUS": "COMPLETED", "X-ORBYN-STATUS": null },
+    { "name": "done and blocked is completed with no extra property", "status": "blocked", "done": true, "STATUS": "COMPLETED", "X-ORBYN-STATUS": null },
+    { "name": "an unknown status exports as todo", "status": "waiting_on_review", "done": false, "STATUS": "NEEDS-ACTION", "X-ORBYN-STATUS": null }
+  ],
+  "json_export": [
+    { "name": "the JSON export includes status", "status": "blocked", "done": false, "exports": { "status": "blocked" } },
+    { "name": "an unknown status is exported as it is", "status": "waiting_on_review", "done": false, "exports": { "status": "waiting_on_review" } }
+  ]
+}
