@@ -212,13 +212,7 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
             settings.threshold,
             settings.log_key_version,
         )
-        .map_err(|error| match error {
-            PublisherError::BadUrl => messages::witness_url_invalid(),
-            PublisherError::Pin(orbyn_witness::client::PinError::DuplicateKeys) => {
-                messages::witness_key_twice()
-            }
-            PublisherError::Pin(_) => messages::witness_threshold(),
-        })?;
+        .map_err(publisher_error_message)?;
         let interval = settings.interval;
         tokio::spawn(async move { publisher.run(interval).await });
     }
@@ -256,4 +250,44 @@ async fn wait_for_shutdown(tls: &Arc<Reloadable>) -> Result<(), String> {
 async fn wait_for_shutdown(_tls: &Arc<Reloadable>) -> Result<(), String> {
     let _ = tokio::signal::ctrl_c().await;
     Ok(())
+}
+
+/// The designed message for a publisher that could not be made: a bad URL, a key pinned twice, or
+/// a threshold at or below half. Each has its own.
+fn publisher_error_message(error: PublisherError) -> String {
+    match error {
+        PublisherError::BadUrl => messages::witness_url_invalid(),
+        PublisherError::Pin(orbyn_witness::client::PinError::DuplicateKeys) => {
+            messages::witness_key_twice()
+        }
+        PublisherError::Pin(_) => messages::witness_threshold(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orbyn_witness::client::PinError;
+
+    #[test]
+    fn each_publisher_error_has_its_own_designed_message() {
+        assert_eq!(
+            publisher_error_message(PublisherError::BadUrl),
+            messages::witness_url_invalid()
+        );
+        assert_eq!(
+            publisher_error_message(PublisherError::Pin(PinError::DuplicateKeys)),
+            messages::witness_key_twice()
+        );
+        assert_eq!(
+            publisher_error_message(PublisherError::Pin(PinError::Threshold)),
+            messages::witness_threshold()
+        );
+        let all = [
+            messages::witness_url_invalid(),
+            messages::witness_key_twice(),
+            messages::witness_threshold(),
+        ];
+        assert!(all[0] != all[1] && all[1] != all[2] && all[0] != all[2]);
+    }
 }

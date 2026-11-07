@@ -1524,6 +1524,44 @@ async fn a_catch_up_cut_short_resumes_from_the_chain_head_and_reaches_the_target
 }
 
 #[tokio::test]
+async fn a_signature_for_an_intermediate_head_is_invalid_whoever_sends_it() {
+    // A genuine, verifying cosignature of the very head asked about, from the pinned witness.
+    let real = serve(73, 60).await;
+    let real_client = client(&real);
+    let (source, target) = idle_chain(1, false);
+    let outcome = Cosigner::new(vec![real_client], 1)
+        .expect("threshold")
+        .cosign(&source, &target)
+        .await;
+    assert!(outcome.enough, "{:?}", outcome.failures);
+    let signature = outcome.cosignatures[0].1.encode().to_vec();
+
+    // A witness that answers every request with it, 200, as if it signed the head on the way.
+    let app = axum::Router::new().route(
+        "/v1/cosign",
+        axum::routing::post(move || {
+            let signature = signature.clone();
+            async move { (axum::http::StatusCode::OK, signature) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let liar = WitnessClient::new(&url, real.public, Duration::from_secs(30)).expect("client");
+    let mut request = source.requests[0].clone();
+    // The same request as the last one is fine: its answer verifies.
+    assert!(matches!(liar.cosign(&request).await, Ok(Some(_))));
+    // Flagged as on the way, any signature is wrong, however well it verifies.
+    request.intermediate = true;
+    assert_eq!(liar.cosign(&request).await, Err(ClientError::Invalid));
+    task.abort();
+}
+
+#[tokio::test]
 async fn an_endless_answer_is_cut_off_at_the_limit_within_the_timeout() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
