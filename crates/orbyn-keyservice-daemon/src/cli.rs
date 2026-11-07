@@ -12,6 +12,7 @@ use orbyn_keyservice_client::hex;
 use orbyn_keyservice_server::{RoleProblem, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
 
+use crate::publisher::{Publisher, PublisherError, PublisherSettings};
 use crate::tls::{Reloadable, TlsFiles};
 use crate::{State, TracingAudit, api, messages, system_now_ms, tls};
 
@@ -152,6 +153,19 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
         Err(KeyServiceError::Hsm(e)) => return Err(hsm_message(&e)),
         Err(_) => return Err(messages::hsm_unreachable()),
     }
+    // The head publisher's settings are checked before anything is opened or bound; with no
+    // witnesses configured there is no publisher, and the service runs without publishing heads.
+    let publisher = PublisherSettings::parse(env)?;
+    if let Some(settings) = &publisher {
+        match keys.log_key_public(settings.log_key_version) {
+            Ok(_) => {}
+            Err(KeyServiceError::Hsm(HsmError::NotFound)) => {
+                return Err(messages::log_key_missing());
+            }
+            Err(KeyServiceError::Hsm(e)) => return Err(hsm_message(&e)),
+            Err(_) => return Err(messages::hsm_unreachable()),
+        }
+    }
     let url = get(env, "ORBYN_KEYSERVICE_DATABASE_URL")
         .ok_or_else(|| messages::not_set("ORBYN_KEYSERVICE_DATABASE_URL"))?;
     let pool = PgPoolOptions::new()
@@ -190,6 +204,18 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
         audit: Arc::new(TracingAudit),
         now_ms: Arc::new(system_now_ms),
     });
+    // The publisher runs beside the API, in this process.
+    if let Some(settings) = publisher {
+        let publisher = Publisher::new(
+            state.clone(),
+            &settings.witnesses,
+            settings.threshold,
+            settings.log_key_version,
+        )
+        .map_err(publisher_error_message)?;
+        let interval = settings.interval;
+        tokio::spawn(async move { publisher.run(interval).await });
+    }
     let server = tls::serve(listener, tls.clone(), api::router(state))
         .map_err(|_| messages::cannot_listen(&bind_text))?;
     wait_for_shutdown(&tls).await?;
@@ -224,4 +250,44 @@ async fn wait_for_shutdown(tls: &Arc<Reloadable>) -> Result<(), String> {
 async fn wait_for_shutdown(_tls: &Arc<Reloadable>) -> Result<(), String> {
     let _ = tokio::signal::ctrl_c().await;
     Ok(())
+}
+
+/// The designed message for a publisher that could not be made: a bad URL, a key pinned twice, or
+/// a threshold at or below half. Each has its own.
+fn publisher_error_message(error: PublisherError) -> String {
+    match error {
+        PublisherError::BadUrl => messages::witness_url_invalid(),
+        PublisherError::Pin(orbyn_witness::client::PinError::DuplicateKeys) => {
+            messages::witness_key_twice()
+        }
+        PublisherError::Pin(_) => messages::witness_threshold(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orbyn_witness::client::PinError;
+
+    #[test]
+    fn each_publisher_error_has_its_own_designed_message() {
+        assert_eq!(
+            publisher_error_message(PublisherError::BadUrl),
+            messages::witness_url_invalid()
+        );
+        assert_eq!(
+            publisher_error_message(PublisherError::Pin(PinError::DuplicateKeys)),
+            messages::witness_key_twice()
+        );
+        assert_eq!(
+            publisher_error_message(PublisherError::Pin(PinError::Threshold)),
+            messages::witness_threshold()
+        );
+        let all = [
+            messages::witness_url_invalid(),
+            messages::witness_key_twice(),
+            messages::witness_threshold(),
+        ];
+        assert!(all[0] != all[1] && all[1] != all[2] && all[0] != all[2]);
+    }
 }
