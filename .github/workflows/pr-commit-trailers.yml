@@ -1,0 +1,32 @@
+name: Commit trailers
+# Fails a pull request when any of its commit messages carries an AI attribution trailer: a
+# Co-Authored-By naming an AI tool, or a "Generated with" line. AI use is disclosed in the pull
+# request's AI usage section instead. It reads commit messages through the API and checks out
+# only `scripts/`, never the rest of the pull request.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  commit-trailers:
+    name: Commit trailers
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+      - name: Check the checker
+        run: python3 scripts/test_check_commit_trailers.py
+      - name: Check the commit messages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PULL: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --paginate "repos/$REPO/pulls/$PULL/commits" \
+            --jq '.[] | {sha: .sha, message: .commit.message}' > commits.jsonl
+          python3 scripts/check_commit_trailers.py commits.jsonl
