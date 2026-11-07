@@ -542,8 +542,20 @@ async fn a_reload_closes_open_connections_so_a_revoked_client_must_present_its_c
     // One client, so its second request would reuse the connection the first opened.
     let client = h.client(&old);
     client.create_or_get(&A).await.expect("served");
-    client.get(&A).await.expect("served again").expect("there");
-    assert_eq!(h.server.connections_accepted(), 1, "one connection so far");
+    // A connection goes back to the client's pool a moment after its response is read, so a
+    // request sent at once can still open a second one. Ask until a request is served on a
+    // connection that was already open: from then on the client holds one it will reuse.
+    let mut reused = false;
+    for _ in 0..40 {
+        let before = h.server.connections_accepted();
+        client.get(&A).await.expect("served again").expect("there");
+        if h.server.connections_accepted() == before {
+            reused = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(reused, "the client never reused an open connection");
     // The old client CA is replaced and the settings reloaded.
     let new_ca = common::Ca::new("client ca 2");
     std::fs::write(&h.files.client_ca, &new_ca.pem).expect("write");
