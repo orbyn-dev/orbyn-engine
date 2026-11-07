@@ -213,7 +213,13 @@ pub struct Cosigner {
     witnesses: Vec<WitnessClient>,
     threshold: usize,
     max_steps: usize,
+    grace: Duration,
 }
+
+/// How long `cosign_within` keeps listening to the witnesses that have not answered once enough
+/// have: a witness that is a little slower than the others still finishes its walk, so it never
+/// falls behind for good; one that is much slower is left to the next cycle.
+pub const DEFAULT_GRACE: Duration = Duration::from_secs(2);
 
 impl Cosigner {
     /// Refuses a threshold at or below half of the witnesses, and a key pinned twice.
@@ -230,7 +236,14 @@ impl Cosigner {
             witnesses,
             threshold,
             max_steps: MAX_CATCH_UP_STEPS,
+            grace: DEFAULT_GRACE,
         })
+    }
+
+    /// How long to go on listening after enough have cosigned (see [`DEFAULT_GRACE`]).
+    pub fn with_grace(mut self, grace: Duration) -> Self {
+        self.grace = grace;
+        self
     }
 
     /// A lower bound on the heads one catch-up walks, for tests of the bound.
@@ -280,6 +293,8 @@ impl Cosigner {
             runs.iter().map(|_| None).collect();
         let mut timer = deadline.map(|d| Box::pin(tokio::time::sleep(d)));
         let threshold = self.threshold;
+        let grace = self.grace;
+        let mut grace_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
         std::future::poll_fn(|cx| {
             for (slot, out) in runs.iter_mut().zip(results.iter_mut()) {
                 if let Some(run) = slot
@@ -294,10 +309,15 @@ impl Cosigner {
                 .flatten()
                 .filter_map(|r| r.as_ref().ok().cloned())
                 .collect();
-            if (stop_when_enough && cosigned_enough(&hash, &pinned, &signed, threshold))
-                || runs.iter().all(Option::is_none)
-            {
+            if runs.iter().all(Option::is_none) {
                 return Poll::Ready(());
+            }
+            if stop_when_enough && cosigned_enough(&hash, &pinned, &signed, threshold) {
+                // Enough: listen a moment longer for the others, then stop.
+                let wait = grace_timer.get_or_insert_with(|| Box::pin(tokio::time::sleep(grace)));
+                if wait.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(());
+                }
             }
             if let Some(timer) = timer.as_mut()
                 && timer.as_mut().poll(cx).is_ready()

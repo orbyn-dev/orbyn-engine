@@ -129,7 +129,8 @@ impl Chain {
                                 counted.fetch_add(1, Ordering::SeqCst);
                                 let wait = delayed.load(Ordering::SeqCst);
                                 if wait > 0 {
-                                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                                    tokio::time::sleep(std::time::Duration::from_millis(wait))
+                                        .await;
                                 }
                             }
                             next.run(req).await

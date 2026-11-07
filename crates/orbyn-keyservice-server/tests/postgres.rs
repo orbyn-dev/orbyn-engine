@@ -426,13 +426,22 @@ async fn heads_follow_the_model_and_chain_and_idle_heads_repeat_the_roots() {
     // Building again before committing gives the same head: nothing was stored.
     assert_eq!(store.build_head(2_000, 1, None).await.expect("again"), head);
     assert_eq!(
-        store.latest_stored_head().await.expect("latest").expect("one").id,
+        store
+            .latest_stored_head()
+            .await
+            .expect("latest")
+            .expect("one")
+            .id,
         genesis_id
     );
 
     // Committing stores it and marks every entry it covers.
     let id = store.commit_head(&head, &[2; 64]).await.expect("commit");
-    let stored = store.latest_stored_head().await.expect("latest").expect("head");
+    let stored = store
+        .latest_stored_head()
+        .await
+        .expect("latest")
+        .expect("head");
     assert_eq!((stored.id, stored.head.clone()), (id, head.clone()));
     assert_eq!(stored.head_hash, head.hash());
     let pending: i64 =
@@ -910,7 +919,11 @@ async fn the_chain_of_heads_cannot_fork_even_when_the_database_defaults_to_repea
     store.commit_head(&first, &[1; 64]).await.expect("commit");
     // Many idle heads built on the same previous head, committed at once: exactly one wins.
     for round in 0..5u64 {
-        let latest = store.latest_stored_head().await.expect("latest").expect("head");
+        let latest = store
+            .latest_stored_head()
+            .await
+            .expect("latest")
+            .expect("head");
         let mut heads = Vec::new();
         for i in 0..4u64 {
             heads.push(

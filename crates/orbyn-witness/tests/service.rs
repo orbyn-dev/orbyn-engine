@@ -1741,6 +1741,36 @@ async fn the_cosigner_returns_as_soon_as_enough_have_cosigned_and_never_waits_fo
     );
     assert_eq!(outcome.cosignatures.len(), 2);
     assert_eq!(outcome.unfinished, vec![2], "the slow one was let go");
+    // Enough have cosigned, but the run listens for the default grace before it lets the slow one go,
+    // so a witness a little behind the others still finishes; it does not listen for ever.
+    assert!(
+        started.elapsed() >= orbyn_witness::client::DEFAULT_GRACE,
+        "stopped after {:?}, before the grace",
+        started.elapsed()
+    );
+    let graceless = Cosigner::new(
+        vec![
+            client(&fast[0]),
+            client(&fast[1]),
+            WitnessClient::new(&url, slow_public, Duration::from_secs(120)).expect("client"),
+        ],
+        2,
+    )
+    .expect("threshold")
+    .with_grace(Duration::from_millis(1200));
+    let (source, target) = idle_chain(1, false);
+    let started = std::time::Instant::now();
+    let outcome = graceless
+        .cosign_within(&source, &target, Duration::from_secs(30))
+        .await;
+    assert!(outcome.enough);
+    assert!(
+        started.elapsed() >= Duration::from_millis(1200)
+            && started.elapsed() < Duration::from_secs(2),
+        "listened for {:?} with a grace of 1.2 s",
+        started.elapsed()
+    );
+    assert_eq!(outcome.unfinished, vec![2]);
     // With a threshold that needs the slow one, the deadline ends the run instead.
     let cosigner = Cosigner::new(
         vec![
