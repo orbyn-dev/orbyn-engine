@@ -29,6 +29,66 @@ pub enum Priority {
     High,
 }
 
+/// Where a task stands while it is open. Done is not a status: it is `done_at`, as before, and it
+/// stays as it is when a task is moved to Done, so reopening brings the earlier status back.
+///
+/// A record without a `status` reads as [`Status::Todo`], and nothing is written for it until a
+/// person changes it. A value a newer client added later reads as To do on the boards but is kept
+/// as it is ([`Status::Other`]), so it is not rewritten unless the person moves the task.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Status {
+    #[default]
+    Todo,
+    InProgress,
+    Blocked,
+    /// A status this version does not know, kept exactly as it was read.
+    Other(String),
+}
+
+impl Status {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Status::Todo => "todo",
+            Status::InProgress => "in_progress",
+            Status::Blocked => "blocked",
+            Status::Other(value) => value,
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "todo" => Status::Todo,
+            "in_progress" => Status::InProgress,
+            "blocked" => Status::Blocked,
+            other => Status::Other(other.to_owned()),
+        }
+    }
+}
+
+impl Serialize for Status {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Status {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // A null (a status that was cleared) reads as To do too.
+        Ok(Option::<String>::deserialize(deserializer)?
+            .map_or(Status::Todo, |value| Status::from_str(&value)))
+    }
+}
+
+/// The lane a task is in on the Tasks board: Done when it is done, otherwise its status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lane {
+    Todo,
+    InProgress,
+    Blocked,
+    Done,
+}
+
 /// When a task is due: a whole day, or a time on that day in the person's local time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "value")]
@@ -70,6 +130,9 @@ pub struct Item {
     #[serde(default)]
     pub priority: Priority,
     pub done_at: Option<Timestamp>,
+    /// To do, in progress or blocked; see [`Status`]. Missing reads as To do.
+    #[serde(default)]
+    pub status: Status,
     /// Deleted items stay 30 days so they can be put back.
     pub deleted_at: Option<Timestamp>,
     #[serde(default)]
@@ -132,6 +195,7 @@ impl Item {
             due: None,
             priority: Priority::None,
             done_at: None,
+            status: Status::Todo,
             deleted_at: None,
             checklist: Vec::new(),
             repeat: None,
@@ -164,6 +228,60 @@ impl Item {
             return Err(ItemError::Invalid("checklist"));
         }
         Ok(())
+    }
+
+    /// The lane on the Tasks board. An unknown status shows as To do.
+    pub fn lane(&self) -> Lane {
+        if self.done_at.is_some() {
+            return Lane::Done;
+        }
+        match self.status {
+            Status::InProgress => Lane::InProgress,
+            Status::Blocked => Lane::Blocked,
+            Status::Todo | Status::Other(_) => Lane::Todo,
+        }
+    }
+
+    /// Moves the task to a lane, as dragging a card does.
+    ///
+    /// To Done: `done_at` is set (unless it already is) and the status is left as it was. Out of
+    /// Done: `done_at` is cleared and the status becomes the lane's. Between the open lanes only
+    /// the status changes. A move to the lane the task is in changes nothing, so an unknown
+    /// status is not rewritten by it.
+    pub fn move_to(&mut self, lane: Lane, now: Timestamp) {
+        if self.lane() == lane {
+            return;
+        }
+        match lane {
+            Lane::Done => self.done_at = Some(now),
+            Lane::Todo => self.reopen(Status::Todo),
+            Lane::InProgress => self.reopen(Status::InProgress),
+            Lane::Blocked => self.reopen(Status::Blocked),
+        }
+    }
+
+    fn reopen(&mut self, status: Status) {
+        self.done_at = None;
+        self.status = status;
+    }
+
+    /// What a repeating task's next occurrence starts as: To do. Completing an occurrence moves the
+    /// due date on and calls this in the same write.
+    pub fn reset_status_for_next_occurrence(&mut self) {
+        self.status = Status::Todo;
+    }
+
+    /// The iCalendar `STATUS` of this task as a VTODO, and the extra property that keeps what
+    /// iCalendar cannot say: `todo` is NEEDS-ACTION, `in_progress` IN-PROCESS, `blocked`
+    /// NEEDS-ACTION with `X-ORBYN-STATUS:BLOCKED`, and done COMPLETED. An unknown status exports
+    /// as To do.
+    pub fn ics_status(&self) -> (&'static str, Option<&'static str>) {
+        match self.lane() {
+            Lane::Done => ("COMPLETED", None),
+            Lane::InProgress => ("IN-PROCESS", None),
+            Lane::Blocked => ("NEEDS-ACTION", Some("BLOCKED")),
+            Lane::Todo => ("NEEDS-ACTION", None),
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -238,6 +356,7 @@ impl Item {
             ("due".to_owned(), json(&self.due)),
             ("priority".to_owned(), json(&self.priority)),
             ("done_at".to_owned(), json(&self.done_at)),
+            ("status".to_owned(), json(&self.status)),
             ("deleted_at".to_owned(), json(&self.deleted_at)),
         ];
         for entry in &self.checklist {
@@ -350,6 +469,7 @@ impl Item {
             due,
             priority: optional(fields, "priority")?.unwrap_or_default(),
             done_at: optional(fields, "done_at")?.flatten(),
+            status: optional(fields, "status")?.unwrap_or_default(),
             deleted_at: optional(fields, "deleted_at")?.flatten(),
             checklist,
             repeat,
