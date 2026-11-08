@@ -1135,7 +1135,20 @@ async fn the_clients_verifier_accepts_what_the_real_service_serves_and_refuses_a
         entry_pages: &[entries.as_str()],
         consistency: None,
     };
-    let verified = verify_service_key(&pins, account, &offered, &answers, None, c.now())
+    // A device that already verified another key refuses this one (trust on first use otherwise).
+    assert!(matches!(
+        verify_service_key(
+            &pins,
+            account,
+            &offered,
+            &answers,
+            Some(&[2; 33]),
+            None,
+            c.now()
+        ),
+        Err(ServiceKeyRefusal::KeyChanged)
+    ));
+    let verified = verify_service_key(&pins, account, &offered, &answers, None, None, c.now())
         .expect("the real service's bytes verify");
     assert_eq!(verified.public_key, public_key);
     assert_eq!(verified.entry_index, record.entry_index);
@@ -1144,19 +1157,35 @@ async fn the_clients_verifier_accepts_what_the_real_service_serves_and_refuses_a
     let mut other_identity = pins.clone();
     other_identity.identity_keys = vec![(1, [9; 32])];
     assert!(matches!(
-        verify_service_key(&other_identity, account, &offered, &answers, None, c.now()),
+        verify_service_key(
+            &other_identity,
+            account,
+            &offered,
+            &answers,
+            None,
+            None,
+            c.now()
+        ),
         Err(ServiceKeyRefusal::BadIdentitySignature)
     ));
     let mut other_log = pins.clone();
     other_log.log.log_keys = vec![(c.log_version, [9; 32])];
     assert!(matches!(
-        verify_service_key(&other_log, account, &offered, &answers, None, c.now()),
+        verify_service_key(&other_log, account, &offered, &answers, None, None, c.now()),
         Err(ServiceKeyRefusal::Log(Refusal::BadLogSignature))
     ));
     let mut other_witnesses = pins.clone();
     other_witnesses.log.witnesses = vec![[7; 32], [8; 32], [9; 32]];
     assert!(matches!(
-        verify_service_key(&other_witnesses, account, &offered, &answers, None, c.now()),
+        verify_service_key(
+            &other_witnesses,
+            account,
+            &offered,
+            &answers,
+            None,
+            None,
+            c.now()
+        ),
         Err(ServiceKeyRefusal::Log(Refusal::NotEnoughWitnesses))
     ));
     // Two hours and a second later, the same bytes are stale.
@@ -1166,6 +1195,7 @@ async fn the_clients_verifier_accepts_what_the_real_service_serves_and_refuses_a
             account,
             &offered,
             &answers,
+            None,
             None,
             c.now() + 2 * 3600 * 1000 + 1000
         ),

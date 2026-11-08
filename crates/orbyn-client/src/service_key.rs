@@ -3,17 +3,33 @@
 //!
 //! The record server gives a device a certification ([`wire::ServiceKeyCertification`]). The server
 //! cannot forge it (only the key service's HSM signs), but the key service's own operators could
-//! certify a second key, and only the log shows that. So the device also fetches, from the key
-//! service's public API and not through the record server, the newest head, the account's lookup
-//! proof and its chain of entries, and [`verify_service_key`] checks all of it:
+//! certify a second key for the account, and only the log can show that. So the device also
+//! fetches, from the key service's public API and not through the record server, the newest head,
+//! the lookup proof of the **offered key** and its chain of entries, and [`verify_service_key`]
+//! checks all of it:
 //!
 //! - the head: the pinned log key signed it, enough pinned witnesses cosigned it, and it is fresh
 //!   by the witnesses' time (`orbyn_translog::verify`);
 //! - that head against the last one this device saw: no rollback, no fork, a consistency proof;
 //! - the account's chain under that head: whole, linked, and ending at the entry the map holds;
-//! - the certification: every certification in the chain is for this account and this key, the
-//!   newest is signed by an identity key this device pinned for its version, and it is the one
-//!   the record server offered; the key is not retired.
+//! - the certification: every certification in the chain is for this account and this key, with
+//!   identity versions that strictly rise (a re-signing under a newer identity is the only reason
+//!   to certify the same key again), none after a retirement, the newest is signed by an identity
+//!   key this device pinned for its version, and it is the one the record server offered; the key
+//!   is not retired.
+//!
+//! **A second key is not caught by the log checks alone.** A second key certified for the same
+//! account has its own map key and its own valid chain, so it verifies on its own. What catches it
+//! is `known_key`: the key this account's devices already verified, which the host keeps locally
+//! and (slice 8e) gossips through the private system zone. A different offered key is refused with
+//! [`ServiceKeyRefusal::KeyChanged`]. With `known_key` `None` the check is **trust on first use**:
+//! the first key the log agrees with is accepted, so a host must store the key it gets back and
+//! pass it every time after.
+//!
+//! The answers have limits ([`MAX_ENTRY_PAGES`], and `orbyn_translog::verify` caps cosignatures).
+//! A witness time ahead of the device's clock is [`ServiceKeyRefusal::ClockAhead`], a verdict about
+//! the device and not the log: a host asks the person to check their clock and shows no takeover
+//! warning.
 //!
 //! The device **escrows only on `Ok`**. Every `Err` is a verdict on the bytes, so a host shows a
 //! possible-takeover warning for the ones that say the log is wrong, and treats a fetch that failed,
@@ -32,6 +48,13 @@ use orbyn_translog::{
     Cosignature, Hash, UnsignedHead, parse_certification, parse_retirement, service_account_map_key,
 };
 use serde_json::Value;
+
+/// A service key: the compressed P-256 point.
+pub type ServicePublicKey = [u8; 33];
+
+/// The most pages of an account's chain a device reads (a page holds up to 100 entries, so up to
+/// 1000 entries; a key's chain is a certification, a few re-signings and a retirement).
+pub const MAX_ENTRY_PAGES: usize = 10;
 
 /// What a device pins in its configuration: the log and witness keys and the key service's
 /// identity keys, each identity by version.
@@ -86,9 +109,22 @@ pub enum ServiceKeyRefusal {
     /// The chain has an entry that is not a certification for this account and this key.
     #[error("the chain holds a certification for another account or key")]
     ForeignCertification,
-    /// A later certification names an older identity version.
-    #[error("a later certification names an older identity")]
-    VersionWentBack,
+    /// A later certification does not name a newer identity than the one before it.
+    #[error("a later certification does not name a newer identity")]
+    VersionNotNewer,
+    /// The chain certifies the key again after retiring it.
+    #[error("the key was certified again after it was retired")]
+    CertifiedAfterRetirement,
+    /// The offered key is not the key this account's devices already verified.
+    #[error("the offered key is not the one already verified")]
+    KeyChanged,
+    /// More entry pages than a chain can need.
+    #[error("too many entry pages")]
+    TooManyPages,
+    /// A witness's time is ahead of this device's clock: the device's clock may be wrong, and the
+    /// log is not shown to be.
+    #[error("a witness time is ahead of this device's clock")]
+    ClockAhead,
     /// The chain holds no certification.
     #[error("the log holds no certification for this key")]
     NotCertified,
@@ -208,13 +244,15 @@ fn b64<const N: usize>(text: &str) -> Result<[u8; N], ServiceKeyRefusal> {
 }
 
 /// Checks the service key the record server offered for the account against the log the key
-/// service published. `seen` is the newest head this device verified before (from storage), or
+/// service published. `known_key` is the key this account's devices already verified (see the
+/// module doc: `None` is trust on first use). `seen` is the newest head this device verified before (from storage), or
 /// `None` the first time; `now_ms` is the device's wall clock.
 pub fn verify_service_key(
     pins: &ServiceKeyPins,
     account_id: [u8; 16],
     offered: &wire::ServiceKeyCertification,
     answers: &LogAnswers<'_>,
+    known_key: Option<&ServicePublicKey>,
     seen: Option<&Seen>,
     now_ms: u64,
 ) -> Result<VerifiedServiceKey, ServiceKeyRefusal> {
@@ -224,7 +262,13 @@ pub fn verify_service_key(
     if offered_account != account_id {
         return Err(ServiceKeyRefusal::WrongAccount);
     }
-    let public: [u8; 33] = b64(&offered.public_key)?;
+    let public: ServicePublicKey = b64(&offered.public_key)?;
+    if known_key.is_some_and(|known| *known != public) {
+        return Err(ServiceKeyRefusal::KeyChanged);
+    }
+    if answers.entry_pages.len() > MAX_ENTRY_PAGES {
+        return Err(ServiceKeyRefusal::TooManyPages);
+    }
     let offered_hash: [u8; 32] = b64(&offered.statement_hash)?;
     let offered_signature: [u8; 64] = b64(&offered.signature)?;
     let point = P256Point::parse(&public).map_err(|_| ServiceKeyRefusal::Malformed)?;
@@ -233,7 +277,10 @@ pub fn verify_service_key(
     // The head, and the log against the last one this device saw.
     let lookup = parse(answers.lookup)?;
     let (signed, head_hex) = signed_head(&lookup)?;
-    let head = log::check_head(&pins.log, &signed, now_ms)?;
+    let head = log::check_head(&pins.log, &signed, now_ms).map_err(|refusal| match refusal {
+        log::Refusal::HeadFromTheFuture => ServiceKeyRefusal::ClockAhead,
+        other => ServiceKeyRefusal::Log(other),
+    })?;
     let proof = match (seen, answers.consistency) {
         (Some(seen), _) if head.head.size == seen.size => Vec::new(),
         (Some(seen), None) if head.head.size > seen.size => {
@@ -282,7 +329,7 @@ pub fn verify_service_key(
 
     // What the chain says about the key.
     let mut newest: Option<(usize, u32)> = None;
-    let mut retired_after_newest = false;
+    let mut retired = false;
     for (position, entry) in entries.iter().enumerate() {
         match entry.kind {
             KIND_SERVICE_KEY => {
@@ -298,25 +345,30 @@ pub fn verify_service_key(
                 if service_key_statement(version, &account_id, &point) != statement {
                     return Err(ServiceKeyRefusal::ForeignCertification);
                 }
+                // Once retired, a key stays retired: nothing in the chain may certify it again.
+                if retired {
+                    return Err(ServiceKeyRefusal::CertifiedAfterRetirement);
+                }
+                // Certifying the same key again is an identity rotation (re-signing under the
+                // new version), so the version must rise: an equal one has no honest source.
                 if let Some((_, before)) = newest
-                    && version < before
+                    && version <= before
                 {
-                    return Err(ServiceKeyRefusal::VersionWentBack);
+                    return Err(ServiceKeyRefusal::VersionNotNewer);
                 }
                 newest = Some((position, version));
-                retired_after_newest = false;
             }
             KIND_SERVICE_KEY_RETIRE => {
                 if parse_retirement(&entry.fields) != Some(public) {
                     return Err(ServiceKeyRefusal::ForeignCertification);
                 }
-                retired_after_newest = true;
+                retired = true;
             }
             _ => {}
         }
     }
     let (position, version) = newest.ok_or(ServiceKeyRefusal::NotCertified)?;
-    if retired_after_newest {
+    if retired {
         return Err(ServiceKeyRefusal::Retired);
     }
     let (statement, signature) = parse_certification(&entries[position].fields)
@@ -410,6 +462,7 @@ mod tests {
         pages: Vec<Value>,
         seen: Option<Seen>,
         consistency: Option<Value>,
+        known: Option<ServicePublicKey>,
         now: u64,
     }
 
@@ -479,6 +532,7 @@ mod tests {
                 map_key,
                 seen: None,
                 consistency: None,
+                known: None,
                 now: NOW,
             };
             case.serve();
@@ -545,6 +599,7 @@ mod tests {
                     entry_pages: &page_refs,
                     consistency: consistency.as_deref(),
                 },
+                self.known.as_ref(),
                 self.seen.as_ref(),
                 self.now,
             )
@@ -698,7 +753,7 @@ mod tests {
             let (_, _, f1) = certification(1, &ACCOUNT, public, &identity(1));
             log.append(map_key, KIND_SERVICE_KEY, f1, T0 - 5);
         });
-        assert_eq!(c.run(), Err(ServiceKeyRefusal::VersionWentBack));
+        assert_eq!(c.run(), Err(ServiceKeyRefusal::VersionNotNewer));
     }
 
     #[test]
@@ -725,6 +780,71 @@ mod tests {
             );
         });
         assert_eq!(c.run(), Err(ServiceKeyRefusal::ForeignCertification));
+    }
+
+    #[test]
+    fn a_second_key_certified_for_the_account_is_refused_once_a_key_is_known() {
+        // Two keys, each with its own valid chain for the same account.
+        let first = Case::new();
+        let second = Case::new();
+        assert_ne!(first.public, second.public);
+        // Trust on first use: with nothing known, each verifies alone.
+        first.run().expect("the first key");
+        second.run().expect("the second key, on its own");
+        // Once the first is known, the second is refused, and the first still passes.
+        let mut c = Case::new();
+        c.known = Some(first.public);
+        assert_eq!(c.run(), Err(ServiceKeyRefusal::KeyChanged));
+        let mut c = Case::new();
+        c.known = Some(c.public);
+        c.run().expect("the known key");
+    }
+
+    #[test]
+    fn the_same_key_certified_again_under_a_newer_identity_is_accepted_and_an_equal_one_is_not() {
+        let c = Case::with(|log, public, map_key| {
+            let (_, _, f1) = certification(1, &ACCOUNT, public, &identity(1));
+            log.append(map_key, KIND_SERVICE_KEY, f1, T0 - 10);
+            let (_, _, f2) = certification(2, &ACCOUNT, public, &identity(2));
+            log.append(map_key, KIND_SERVICE_KEY, f2, T0 - 5);
+        });
+        assert_eq!(c.run().expect("rotated").identity_version, 2);
+        let c = Case::with(|log, public, map_key| {
+            for at in [T0 - 10, T0 - 5] {
+                let (_, _, f) = certification(1, &ACCOUNT, public, &identity(1));
+                log.append(map_key, KIND_SERVICE_KEY, f, at);
+            }
+        });
+        assert_eq!(c.run(), Err(ServiceKeyRefusal::VersionNotNewer));
+    }
+
+    #[test]
+    fn a_certification_after_a_retirement_is_refused() {
+        let c = Case::with(|log, public, map_key| {
+            let (_, _, f1) = certification(1, &ACCOUNT, public, &identity(1));
+            log.append(map_key, KIND_SERVICE_KEY, f1, T0 - 10);
+            log.append(
+                map_key,
+                KIND_SERVICE_KEY_RETIRE,
+                retirement_fields(public),
+                T0 - 7,
+            );
+            let (_, _, f2) = certification(2, &ACCOUNT, public, &identity(2));
+            log.append(map_key, KIND_SERVICE_KEY, f2, T0 - 5);
+        });
+        assert_eq!(c.run(), Err(ServiceKeyRefusal::CertifiedAfterRetirement));
+    }
+
+    #[test]
+    fn too_many_pages_and_a_clock_behind_the_witnesses_are_their_own_verdicts() {
+        let mut c = Case::new();
+        let page = c.pages[0].clone();
+        c.pages = vec![page; MAX_ENTRY_PAGES + 1];
+        assert_eq!(c.run(), Err(ServiceKeyRefusal::TooManyPages));
+        // The device's clock is more than five minutes behind the witnesses' time.
+        let mut c = Case::new();
+        c.now = T0 - 6 * 60 * 1000;
+        assert_eq!(c.run(), Err(ServiceKeyRefusal::ClockAhead));
     }
 
     #[test]
@@ -814,6 +934,7 @@ mod tests {
                     entry_pages: &[],
                     consistency: None
                 },
+                None,
                 None,
                 NOW,
             ),

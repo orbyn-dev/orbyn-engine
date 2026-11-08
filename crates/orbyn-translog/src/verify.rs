@@ -13,7 +13,11 @@
 //! 3. [`check_chain`]: an account's service-map proof shows the key **present** under the head's
 //!    map root, and its chain of entries is whole: each in the log of that head, filed under the
 //!    account's map key, linked to the one before, and ending at the entry the map's value names,
-//!    so an omitted newest entry shows as a value that does not match.
+//!    so an omitted newest entry shows as a value that does not match. Entries must also rise in
+//!    log position along the chain. That is not implied by the hashes alone: it holds because a
+//!    witness replays the log in order and checks each account's chain as it goes, so under an
+//!    honest quorum a chain cannot link to an entry that is not yet in the log. The check is kept
+//!    as a second line, not as the proof.
 //!
 //! A fetch that fails or a service that has published nothing is availability: the host never
 //! calls these and never reports a takeover. Everything here that fails is a verdict on bytes.
@@ -34,6 +38,8 @@ pub const MAX_CLOCK_AHEAD_MS: u64 = 5 * 60 * 1000;
 pub enum Refusal {
     #[error("the head names a log key version this device has not pinned")]
     UnpinnedLogKey,
+    #[error("the head carries more cosignatures than twice the pinned witnesses")]
+    TooManyCosignatures,
     #[error("the log key did not sign the head")]
     BadLogSignature,
     #[error("too few pinned witnesses cosigned the head (or the pinned set is not usable)")]
@@ -121,6 +127,11 @@ impl From<&CheckedHead> for Seen {
 /// `now_ms` (the device's clock).
 pub fn check_head(pins: &Pins, signed: &SignedHead, now_ms: u64) -> Result<CheckedHead, Refusal> {
     let head = &signed.head;
+    // A key service cannot make a device verify an unbounded list: twice the pinned witnesses
+    // leaves room for a duplicate or a stranger per witness and no more.
+    if signed.cosignatures.len() > pins.witnesses.len().saturating_mul(2) {
+        return Err(Refusal::TooManyCosignatures);
+    }
     let (_, log_key) = pins
         .log_keys
         .iter()
@@ -297,6 +308,23 @@ mod tests {
 
     fn checked(log: &mut Log) -> CheckedHead {
         check_head(&log.pins(2), &log.head(), NOW).expect("ok")
+    }
+
+    #[test]
+    fn more_than_twice_the_pinned_witnesses_in_cosignatures_is_refused() {
+        let mut log = log();
+        let pins = log.pins(2);
+        let mut padded = log.head_at(T0, &[0, 1]);
+        let extra = padded.cosignatures[0].clone();
+        while padded.cosignatures.len() < 6 {
+            padded.cosignatures.push(extra.clone());
+        }
+        assert!(check_head(&pins, &padded, NOW).is_ok(), "twice is allowed");
+        padded.cosignatures.push(extra);
+        assert_eq!(
+            check_head(&pins, &padded, NOW),
+            Err(Refusal::TooManyCosignatures)
+        );
     }
 
     #[test]
