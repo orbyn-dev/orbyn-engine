@@ -14,7 +14,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::publisher::{Publisher, PublisherError, PublisherSettings};
 use crate::tls::{Reloadable, TlsFiles};
-use crate::{State, TracingAudit, api, messages, system_now_ms, tls};
+use crate::{State, TracingAudit, api, messages, public, system_now_ms, tls};
 
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
 
@@ -197,6 +197,55 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|_| messages::cannot_listen(&bind_text))?;
+    // The public API, when it has an address: its own plain-HTTP listener, apart from the
+    // internal one, behind the tunnel that ends TLS. Bound before anything runs.
+    let public_listener = match get(env, "ORBYN_KS_PUBLIC_BIND") {
+        None => None,
+        Some(text) => {
+            let address: SocketAddr = text
+                .trim()
+                .parse()
+                .map_err(|_| messages::public_bind_invalid())?;
+            Some(
+                tokio::net::TcpListener::bind(address)
+                    .await
+                    .map_err(|_| messages::cannot_listen_public(&text))?,
+            )
+        }
+    };
+    let client_ip_header = match get(env, "ORBYN_KS_CLIENT_IP_HEADER") {
+        None => None,
+        Some(text) => {
+            Some(public::header_name(&text).ok_or_else(messages::client_ip_header_invalid)?)
+        }
+    };
+    let allowed_origins: Vec<String> = get(env, "ORBYN_KS_ALLOWED_ORIGINS")
+        .map(|text| {
+            text.split(',')
+                .map(|o| o.trim().to_owned())
+                .filter(|o| !o.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let keys_info = public::KeysInfo {
+        log_keys: publisher
+            .as_ref()
+            .and_then(|p| {
+                keys.log_key_public(p.log_key_version)
+                    .ok()
+                    .map(|key| vec![(p.log_key_version, key)])
+            })
+            .unwrap_or_default(),
+        identity_keys: keys
+            .identity_public(version)
+            .map(|key| vec![(version, key)])
+            .unwrap_or_default(),
+        witnesses: publisher
+            .as_ref()
+            .map(|p| p.witnesses.iter().map(|(_, key)| *key).collect())
+            .unwrap_or_default(),
+        threshold: publisher.as_ref().map_or(0, |p| p.threshold),
+    };
     let state = Arc::new(State {
         store,
         keys,
@@ -216,9 +265,25 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
         let interval = settings.interval;
         tokio::spawn(async move { publisher.run(interval).await });
     }
+    let public_task = public_listener.map(|listener| {
+        public::serve(
+            listener,
+            public::router(
+                state.store.clone(),
+                public::PublicConfig {
+                    allowed_origins,
+                    client_ip_header,
+                    keys: keys_info,
+                },
+            ),
+        )
+    });
     let server = tls::serve(listener, tls.clone(), api::router(state))
         .map_err(|_| messages::cannot_listen(&bind_text))?;
     wait_for_shutdown(&tls).await?;
+    if let Some(task) = public_task {
+        task.abort();
+    }
     server.stop().await;
     Ok(())
 }

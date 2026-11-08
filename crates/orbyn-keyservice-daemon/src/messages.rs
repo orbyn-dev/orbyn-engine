@@ -208,6 +208,28 @@ pub fn bind_invalid() -> String {
     )
 }
 
+// TODO-design: the three messages for the public API's settings are plain text in the shape of
+// the internal bind's, not yet drawn.
+pub fn public_bind_invalid() -> String {
+    error(
+        "ORBYN_KS_PUBLIC_BIND is not a valid address",
+        "Use host:port, for example 127.0.0.1:8480.",
+    )
+}
+
+pub fn cannot_listen_public(address: &str) -> String {
+    format!(
+        "error: the key service can't listen on {address}\n  Another program may be using that port, or the address isn't one this machine has.\n  Choose another with ORBYN_KS_PUBLIC_BIND."
+    )
+}
+
+pub fn client_ip_header_invalid() -> String {
+    error(
+        "ORBYN_KS_CLIENT_IP_HEADER is not a header name",
+        "Use a header name such as cf-connecting-ip.",
+    )
+}
+
 pub fn no_command() -> String {
     error(
         "no command given",

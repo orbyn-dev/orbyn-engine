@@ -13,6 +13,7 @@
 pub mod api;
 pub mod cli;
 pub mod messages;
+pub mod public;
 pub mod publisher;
 pub mod tls;
 
