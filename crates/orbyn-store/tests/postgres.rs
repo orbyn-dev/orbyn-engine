@@ -8,9 +8,10 @@ use orbyn_core::Database;
 use orbyn_core::accounts::{DeviceState, Limit, Session};
 use orbyn_crypto::DeviceKeys;
 use orbyn_store::{
-    Change, ChangeToken, Hub, KEY_ID_LEN, Limits, NewEnvelope, NewProtection, NewServiceEnvelope,
-    Notice, ProtectionLevel, Rotation, SERVICE_MISSING_PAGE, ServiceCertification, Store,
-    StoreError, Upload, ZONE_CHANGED_JOB,
+    Change, ChangeToken, Hub, KEY_ID_LEN, Limits, NewEnvelope, NewProtection,
+    NewServiceCertification, NewServiceEnvelope, Notice, ProtectionLevel, Rotation,
+    SERVICE_KEY_RETIRE_JOB, SERVICE_MISSING_PAGE, ServiceCertification, Store, StoreError, Upload,
+    ZONE_CHANGED_JOB,
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -2269,14 +2270,19 @@ fn hash_of(session: &Session, new: &NewProtection) -> [u8; 32] {
     ))
 }
 
-fn certification(n: u8) -> ServiceCertification {
-    ServiceCertification {
+fn certification(n: u8) -> NewServiceCertification {
+    NewServiceCertification {
         identity_version: 1,
         public_key: vec![n; 33],
         statement: vec![n; 77],
         signature: vec![n; 64],
-        statement_hash: [n; 32],
     }
+}
+
+/// The hash the store computes for `certification(n)`: SHA-256 of its statement.
+fn service_hash(n: u8) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest([n; 77]).into()
 }
 
 fn service_envelope(zone: &str, key: u8, bytes: &[u8], hash: u8) -> NewServiceEnvelope {
@@ -2284,7 +2290,7 @@ fn service_envelope(zone: &str, key: u8, bytes: &[u8], hash: u8) -> NewServiceEn
         zone: zone.into(),
         key_id: vec![key; KEY_ID_LEN],
         envelope: bytes.to_vec(),
-        statement_hash: [hash; 32],
+        statement_hash: service_hash(hash),
     }
 }
 
@@ -2332,7 +2338,13 @@ async fn service_envelopes_sit_beside_device_envelopes_and_a_retry_replaces_one(
             .service_certification(laptop.account_id)
             .await
             .expect("read"),
-        Some(certification(5))
+        Some(ServiceCertification {
+            identity_version: 1,
+            public_key: vec![5; 33],
+            statement: vec![5; 77],
+            signature: vec![5; 64],
+            statement_hash: service_hash(5),
+        })
     );
 
     // Nothing is held for the service yet: both zone keys are missing, in order.
@@ -2354,7 +2366,7 @@ async fn service_envelopes_sit_beside_device_envelopes_and_a_retry_replaces_one(
         ),
         ("inbox", &b"service one"[..], laptop.device_id)
     );
-    assert_eq!(held[0].statement_hash, [5; 32]);
+    assert_eq!(held[0].statement_hash, service_hash(5));
     let missing = store.service_missing(&laptop).await.expect("missing");
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0].zone, "work");
@@ -2583,7 +2595,7 @@ async fn the_service_recipient_has_its_own_cap_and_missing_keys_come_a_hundred_a
             zone: m.zone.clone(),
             key_id: m.key_id.clone(),
             envelope: b"s".to_vec(),
-            statement_hash: [5; 32],
+            statement_hash: service_hash(5),
         })
         .collect();
     store
@@ -2592,6 +2604,401 @@ async fn the_service_recipient_has_its_own_cap_and_missing_keys_come_a_hundred_a
         .expect("a hundred");
     let rest = store.service_missing(&laptop).await.expect("rest");
     assert_eq!(rest.len(), 30, "the next page is what is still missing");
+    db.pool().close().await;
+}
+
+/// A signed setting of `level` as number `seq` after `prev`, and the hash the next one names.
+fn signed(
+    session: &Session,
+    keys: &DeviceKeys,
+    level: ProtectionLevel,
+    seq: u64,
+    prev: [u8; 32],
+) -> (NewProtection, [u8; 32]) {
+    let now = now_secs();
+    let new = setting(session, keys, level, seq, prev, now);
+    let byte = match level {
+        ProtectionLevel::Standard => auth::PROTECTION_STANDARD,
+        ProtectionLevel::Advanced => auth::PROTECTION_ADVANCED,
+    };
+    let message = auth::protection_message(
+        session.account_id.as_bytes(),
+        session.device_id.as_bytes(),
+        byte,
+        seq,
+        &prev,
+        now,
+    );
+    (new, auth::protection_hash(&message))
+}
+
+fn roomy_protection() -> Limits {
+    Limits {
+        protection_per_hour: Limit::new(1000, Duration::from_secs(3600)),
+        protection_per_day: Limit::new(1000, Duration::from_secs(86_400)),
+        ..Limits::default()
+    }
+}
+
+async fn retire_jobs(db: &Database, account: Uuid) -> Vec<(String, i32)> {
+    sqlx::query_as(
+        "SELECT idempotency_key, max_attempts FROM jobs WHERE kind = $1 AND payload->>'account_id' = $2
+         ORDER BY created_at",
+    )
+    .bind(SERVICE_KEY_RETIRE_JOB)
+    .bind(account.to_string())
+    .fetch_all(db.pool())
+    .await
+    .expect("jobs")
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn switching_to_advanced_removes_the_service_copy_and_queues_the_retire_in_one_transaction() {
+    let (store, db) = store_with(roomy_protection()).await;
+    let account = account(&db).await;
+    let (laptop, keys) = keyed_device(&db, account, "trusted").await;
+    let phone = device(&db, account, "trusted").await;
+    store
+        .put_envelopes(&laptop, &[envelope(&phone, "inbox", 1, b"device")])
+        .await
+        .expect("device envelope");
+    store
+        .put_service_certification(account, &certification(5))
+        .await
+        .expect("certification");
+    store
+        .put_service_envelopes(
+            &laptop,
+            &[
+                service_envelope("inbox", 1, b"service", 5),
+                service_envelope("work", 2, b"service", 5),
+            ],
+        )
+        .await
+        .expect("service envelopes");
+    let (first, first_hash) = signed(
+        &laptop,
+        &keys,
+        ProtectionLevel::Standard,
+        1,
+        auth::PROTECTION_GENESIS,
+    );
+    store
+        .put_protection(&laptop, &first)
+        .await
+        .expect("standard");
+    // Standard changes nothing about the copy.
+    assert_eq!(
+        store
+            .list_service_envelopes(&laptop)
+            .await
+            .expect("held")
+            .len(),
+        2
+    );
+    assert!(retire_jobs(&db, account).await.is_empty());
+
+    let (advanced, advanced_hash) =
+        signed(&laptop, &keys, ProtectionLevel::Advanced, 2, first_hash);
+    store
+        .put_protection(&laptop, &advanced)
+        .await
+        .expect("advanced");
+    // The service envelopes and the cached certification are gone; the device envelope is not.
+    assert!(
+        store
+            .list_service_envelopes(&laptop)
+            .await
+            .expect("held")
+            .is_empty()
+    );
+    assert_eq!(
+        store.service_certification(account).await.expect("cert"),
+        None
+    );
+    assert_eq!(
+        store.list_envelopes(&phone).await.expect("devices").len(),
+        1
+    );
+    // And the key service is to be told, once for this switch, with a long run of attempts.
+    let jobs = retire_jobs(&db, account).await;
+    assert_eq!(jobs, vec![(format!("{account}:2"), i32::MAX)]);
+    // Nothing more goes into the service's copy, and the certification is not remembered again.
+    assert!(matches!(
+        store
+            .put_service_envelopes(&laptop, &[service_envelope("inbox", 1, b"x", 5)])
+            .await,
+        Err(StoreError::ProtectionAdvanced)
+    ));
+    assert!(matches!(
+        store
+            .put_service_certification(account, &certification(5))
+            .await,
+        Err(StoreError::ProtectionAdvanced)
+    ));
+    assert_eq!(
+        store.service_certification(account).await.expect("cert"),
+        None
+    );
+    // Going back to Standard and to Advanced again is a switch of its own: its own job.
+    let (standard, standard_hash) =
+        signed(&laptop, &keys, ProtectionLevel::Standard, 3, advanced_hash);
+    store
+        .put_protection(&laptop, &standard)
+        .await
+        .expect("standard again");
+    let (again, _) = signed(&laptop, &keys, ProtectionLevel::Advanced, 4, standard_hash);
+    store
+        .put_protection(&laptop, &again)
+        .await
+        .expect("advanced again");
+    assert_eq!(
+        retire_jobs(&db, account).await,
+        vec![
+            (format!("{account}:2"), i32::MAX),
+            (format!("{account}:4"), i32::MAX)
+        ]
+    );
+    db.pool().close().await;
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_refused_switch_removes_nothing_and_queues_nothing() {
+    let (store, db) = store_with(roomy_protection()).await;
+    let account = account(&db).await;
+    let (laptop, keys) = keyed_device(&db, account, "trusted").await;
+    store
+        .put_service_certification(account, &certification(5))
+        .await
+        .expect("certification");
+    store
+        .put_service_envelopes(&laptop, &[service_envelope("inbox", 1, b"service", 5)])
+        .await
+        .expect("service");
+    // A setting that does not follow the chain is a conflict: the copy stays, no job.
+    let (wrong, _) = signed(
+        &laptop,
+        &keys,
+        ProtectionLevel::Advanced,
+        5,
+        auth::PROTECTION_GENESIS,
+    );
+    assert!(store.put_protection(&laptop, &wrong).await.is_err());
+    // While the account's deletion is scheduled a switch waits, and so does the copy.
+    sqlx::query(
+        "UPDATE accounts SET deletion_scheduled_at = now() + interval '1 day' WHERE id = $1",
+    )
+    .bind(account)
+    .execute(db.pool())
+    .await
+    .expect("schedule");
+    let (advanced, _) = signed(
+        &laptop,
+        &keys,
+        ProtectionLevel::Advanced,
+        1,
+        auth::PROTECTION_GENESIS,
+    );
+    assert!(matches!(
+        store.put_protection(&laptop, &advanced).await,
+        Err(StoreError::DeletionScheduled)
+    ));
+    assert_eq!(
+        store
+            .list_service_envelopes(&laptop)
+            .await
+            .expect("held")
+            .len(),
+        1
+    );
+    assert!(retire_jobs(&db, account).await.is_empty());
+    // Nothing is written to the service's copy while the deletion is scheduled either: a stolen
+    // device could replace the envelopes with junk in the grace period.
+    assert!(matches!(
+        store
+            .put_service_envelopes(&laptop, &[service_envelope("inbox", 1, b"junk", 5)])
+            .await,
+        Err(StoreError::DeletionScheduled)
+    ));
+    assert_eq!(
+        store.list_service_envelopes(&laptop).await.expect("held")[0].envelope,
+        b"service"
+    );
+    db.pool().close().await;
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_statement_hash_is_computed_by_the_store_and_a_certification_in_flight_cannot_outlive_the_switch()
+ {
+    let (store, db) = store_with(roomy_protection()).await;
+    let account = account(&db).await;
+    let (laptop, keys) = keyed_device(&db, account, "trusted").await;
+    // The store computes the hash from the statement: there is no way to give it another.
+    store
+        .put_service_certification(account, &certification(7))
+        .await
+        .expect("certification");
+    let held = store
+        .service_certification(account)
+        .await
+        .expect("read")
+        .expect("there");
+    assert_eq!(held.statement_hash, service_hash(7));
+    // A malformed one is refused.
+    let mut short = certification(7);
+    short.statement.pop();
+    assert!(
+        store
+            .put_service_certification(account, &short)
+            .await
+            .is_err()
+    );
+
+    // A put and a switch to Advanced racing, many times over: whichever the account lock lets in
+    // first, the account ends with no copy, no certification, and exactly one retire job. (Each
+    // round is a fresh account, so one round's job does not hide the next.)
+    for round in 0..8u8 {
+        let account = self::account(&db).await;
+        let (laptop, keys) = keyed_device(&db, account, "trusted").await;
+        store
+            .put_service_certification(account, &certification(5))
+            .await
+            .expect("certification");
+        let (advanced, _) = signed(
+            &laptop,
+            &keys,
+            ProtectionLevel::Advanced,
+            1,
+            auth::PROTECTION_GENESIS,
+        );
+        let envelopes = [service_envelope("inbox", round, b"service", 5)];
+        let new_certification = certification(5);
+        let (switched, put, certified) = tokio::join!(
+            store.put_protection(&laptop, &advanced),
+            store.put_service_envelopes(&laptop, &envelopes),
+            store.put_service_certification(account, &new_certification),
+        );
+        assert!(switched.is_ok(), "round {round}: {switched:?}");
+        assert!(
+            put.is_ok() || matches!(put, Err(StoreError::ProtectionAdvanced)),
+            "round {round}: {put:?}"
+        );
+        assert!(
+            certified.is_ok() || matches!(certified, Err(StoreError::ProtectionAdvanced)),
+            "round {round}: {certified:?}"
+        );
+        // After the switch the account holds nothing of the copy, whatever the order was.
+        assert!(
+            store
+                .list_service_envelopes(&laptop)
+                .await
+                .expect("held")
+                .is_empty(),
+            "round {round}"
+        );
+        assert_eq!(
+            store.service_certification(account).await.expect("cert"),
+            None,
+            "round {round}"
+        );
+        assert_eq!(retire_jobs(&db, account).await.len(), 1, "round {round}");
+    }
+    let _ = (laptop, keys);
+    db.pool().close().await;
+}
+
+/// Holds the account's lock in a transaction that has stored an Advanced setting but not committed
+/// it, as the switch does. A write to the service's copy started now must wait for the lock and,
+/// once the switch commits, find the account Advanced and be refused. Without the lock it would
+/// finish at once (the setting is not visible yet) and the copy would outlive the switch.
+async fn holding_a_switch<T>(
+    db: &Database,
+    account: Uuid,
+    signer: Uuid,
+    write: impl std::future::Future<Output = T>,
+) -> T {
+    let mut switch = db.pool().begin().await.expect("begin");
+    sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(account)
+        .execute(&mut *switch)
+        .await
+        .expect("lock");
+    sqlx::query(
+        "INSERT INTO protection_settings
+             (account_id, seq, level, prev, hash, signed_at, signer_device_id, signature)
+         VALUES ($1, 1, 'advanced', decode(repeat('00', 32), 'hex'), decode(repeat('11', 32), 'hex'), 1, $2,
+                 decode(repeat('22', 64), 'hex'))",
+    )
+    .bind(account)
+    .bind(signer)
+    .execute(&mut *switch)
+    .await
+    .expect("setting");
+    tokio::pin!(write);
+    tokio::select! {
+        _ = &mut write => panic!("the write did not wait for the account's lock"),
+        () = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+    switch.commit().await.expect("commit the switch");
+    tokio::time::timeout(Duration::from_secs(10), write)
+        .await
+        .expect("the write finished once the lock was free")
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_write_to_the_service_copy_waits_for_a_switch_that_holds_the_account_and_is_then_refused()
+{
+    let (store, db) = store().await;
+    // The certification put.
+    let account = account(&db).await;
+    let laptop = device(&db, account, "trusted").await;
+    let new = certification(5);
+    let refused = holding_a_switch(
+        &db,
+        account,
+        laptop.device_id,
+        store.put_service_certification(account, &new),
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(StoreError::ProtectionAdvanced)),
+        "{refused:?}"
+    );
+    assert_eq!(
+        store.service_certification(account).await.expect("cert"),
+        None
+    );
+
+    // The envelope put, on an account that already has its certification and one envelope.
+    let account = self::account(&db).await;
+    let laptop = device(&db, account, "trusted").await;
+    store
+        .put_service_certification(account, &certification(5))
+        .await
+        .expect("certification");
+    let envelopes = [service_envelope("inbox", 1, b"service", 5)];
+    let refused = holding_a_switch(
+        &db,
+        account,
+        laptop.device_id,
+        store.put_service_envelopes(&laptop, &envelopes),
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(StoreError::ProtectionAdvanced)),
+        "{refused:?}"
+    );
+    assert!(
+        store
+            .list_service_envelopes(&laptop)
+            .await
+            .expect("held")
+            .is_empty()
+    );
     db.pool().close().await;
 }
 

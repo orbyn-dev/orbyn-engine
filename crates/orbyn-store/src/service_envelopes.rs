@@ -7,6 +7,7 @@
 
 use crate::{Result, Store, StoreError, check_zone_name, keychain::KEY_ID_LEN, require_trusted};
 use orbyn_core::accounts::Session;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
@@ -24,6 +25,18 @@ pub struct ServiceCertification {
     pub signature: Vec<u8>,
     /// SHA-256 of the statement, which a service envelope names.
     pub statement_hash: [u8; 32],
+}
+
+/// A certification to remember. The statement hash is **not** part of it: the store computes it
+/// from the statement, so a caller cannot give the account a hash that the statement does not have.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewServiceCertification {
+    pub identity_version: u32,
+    /// The compressed P-256 service public key (33 bytes).
+    pub public_key: Vec<u8>,
+    /// The signed statement (77 bytes) and the identity's signature over it (64 bytes).
+    pub statement: Vec<u8>,
+    pub signature: Vec<u8>,
 }
 
 /// A service envelope a device sends.
@@ -63,13 +76,16 @@ fn hash_of(bytes: Vec<u8>) -> Result<[u8; 32]> {
 }
 
 impl Store {
-    /// Remembers the account's certification, as the key service answered it. The account has one:
-    /// a newer one (another identity version, a new generation) replaces it. Public data, written
-    /// by the record server itself, not on behalf of a device.
+    /// Remembers the account's certification, as the key service answered it. The account has
+    /// one: a newer one (another identity version, a new generation) replaces it. Public data,
+    /// written by the record server itself, not on behalf of a device. **Under the account's lock,
+    /// and refused for an account whose newest stored setting is Advanced** (`ProtectionAdvanced`),
+    /// so a key service answer that was in flight when the person switched cannot bring back what
+    /// the switch removed. The statement hash is computed here.
     pub async fn put_service_certification(
         &self,
         account_id: Uuid,
-        certification: &ServiceCertification,
+        certification: &NewServiceCertification,
     ) -> Result<()> {
         if certification.public_key.len() != 33
             || certification.statement.len() != 77
@@ -77,6 +93,15 @@ impl Store {
             || certification.identity_version == 0
         {
             return Err(StoreError::InvalidEnvelope);
+        }
+        let hash: [u8; 32] = Sha256::digest(&certification.statement).into();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await?;
+        if newest_level_is_advanced(&mut tx, account_id).await? {
+            return Err(StoreError::ProtectionAdvanced);
         }
         sqlx::query(
             "INSERT INTO account_service_keys
@@ -91,10 +116,11 @@ impl Store {
         .bind(i32::try_from(certification.identity_version).map_err(|_| StoreError::Internal)?)
         .bind(&certification.public_key)
         .bind(&certification.statement)
-        .bind(certification.statement_hash.as_slice())
+        .bind(hash.as_slice())
         .bind(&certification.signature)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -157,6 +183,18 @@ impl Store {
         require_trusted(&mut *tx, session, true).await?;
         if newest_level_is_advanced(&mut tx, session.account_id).await? {
             return Err(StoreError::ProtectionAdvanced);
+        }
+        // While the account's deletion is scheduled nothing is written to the service's copy: a
+        // stolen device could otherwise replace the envelopes with junk during the grace period,
+        // as it cannot rotate a zone key then.
+        let scheduled: Option<bool> = sqlx::query_scalar(
+            "SELECT deletion_scheduled_at IS NOT NULL FROM accounts WHERE id = $1",
+        )
+        .bind(session.account_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if scheduled == Some(true) {
+            return Err(StoreError::DeletionScheduled);
         }
         let held: Option<Vec<u8>> = sqlx::query_scalar(
             "SELECT statement_hash FROM account_service_keys WHERE account_id = $1",

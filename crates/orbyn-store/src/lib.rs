@@ -39,8 +39,8 @@ pub use protection::{NewProtection, PROTECTION_PAGE, ProtectionLevel, Protection
 pub use purge::purge_accounts;
 pub use purge::{Purged, purge};
 pub use service_envelopes::{
-    MissingServiceEnvelope, NewServiceEnvelope, SERVICE_MISSING_PAGE, ServiceCertification,
-    ServiceEnvelope,
+    MissingServiceEnvelope, NewServiceCertification, NewServiceEnvelope, SERVICE_MISSING_PAGE,
+    ServiceCertification, ServiceEnvelope,
 };
 pub use token::ChangeToken;
 
@@ -55,6 +55,16 @@ use uuid::Uuid;
 pub const CHANGES_CHANNEL: &str = "orbyn_zone_changes";
 /// The job kind enqueued for subscribed devices after a zone changes.
 pub const ZONE_CHANGED_JOB: &str = "zone_changed";
+
+/// The job that tells the key service to retire an account's service key, queued in the same
+/// transaction that stores an Advanced setting. Its payload is `{"account_id": "<uuid>"}`; the
+/// idempotency key names the account and the setting, so one switch queues one job.
+pub const SERVICE_KEY_RETIRE_JOB: &str = "service_key_retire";
+
+/// Attempts the retire job gets: **no limit in practice** (the queue's backoff caps at ten minutes,
+/// so it tries every ten minutes until the key service has done it). A limit would leave the key
+/// alive under Advanced once it ran out, and the finished-job cleanup would remove the evidence.
+pub const SERVICE_KEY_RETIRE_ATTEMPTS: i32 = i32::MAX;
 
 /// Sizes and counts the store accepts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

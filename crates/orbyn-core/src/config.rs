@@ -67,6 +67,22 @@ pub struct Config {
     pub smtp_ca_file: Option<String>,
     /// `ORBYN_SIGNUP=invite|open`; `invite` unless set.
     pub signup: SignupMode,
+    /// The key service this process asks for service keys and tells to retire them: the server and
+    /// the worker alike. All three settings or none. Without them nothing is escrowed.
+    pub key_service: Option<KeyServiceSettings>,
+}
+
+/// How to reach the key service's internal API over mutual TLS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyServiceSettings {
+    /// `ORBYN_KEYSERVICE_URL`: `https://host:port`.
+    pub url: String,
+    /// `ORBYN_KEYSERVICE_CA_FILE`: the PEM of the CA that signed the key service's certificate,
+    /// the only trust root for it.
+    pub ca_file: String,
+    /// `ORBYN_KEYSERVICE_CLIENT_FILE`: this process's certificate chain followed by its private
+    /// key, PEM. The private key is a secret.
+    pub client_file: String,
 }
 
 impl ConfigError {
@@ -76,6 +92,8 @@ impl ConfigError {
         matches!(
             self,
             Self::MissingMailFrom
+                | Self::KeyServiceIncomplete
+                | Self::InvalidKeyServiceUrl
                 | Self::CaFileWithoutSmtp
                 | Self::LogCodesNotStaging
                 | Self::LogCodesNeedsInvite
@@ -103,6 +121,7 @@ impl std::fmt::Debug for Config {
             .field("smtp_ca_file", &self.smtp_ca_file)
             .field("mail_log_codes", &self.mail_log_codes)
             .field("signup", &self.signup)
+            .field("key_service", &self.key_service.as_ref().map(|k| &k.url))
             .finish()
     }
 }
@@ -135,6 +154,13 @@ pub enum ConfigError {
     InvalidAccountUrl,
     #[error("ORBYN_SIGNUP can only be `invite` or `open`")]
     InvalidSignup,
+    // TODO-design: plain text in the shape of the other settings' messages, not yet drawn.
+    #[error(
+        "error: the key service needs all of ORBYN_KEYSERVICE_URL, ORBYN_KEYSERVICE_CA_FILE and ORBYN_KEYSERVICE_CLIENT_FILE\n  Set all three, or none to run without a key service."
+    )]
+    KeyServiceIncomplete,
+    #[error("error: ORBYN_KEYSERVICE_URL must be an https:// address\n  Use https://host:port.")]
+    InvalidKeyServiceUrl,
     // The three refusals of `ORBYN_MAIL=log-codes`, as designed (Account Designs v55, frame
     // `em-ops-log-codes-refused`).
     #[error(
@@ -262,6 +288,24 @@ impl Config {
                 .filter(|n| (crate::db::MIN_POOL_SIZE..=crate::db::MAX_POOL_SIZE).contains(n))
                 .ok_or(ConfigError::InvalidPoolSize)?,
         };
+        let key_service = match (
+            optional("ORBYN_KEYSERVICE_URL"),
+            optional("ORBYN_KEYSERVICE_CA_FILE"),
+            optional("ORBYN_KEYSERVICE_CLIENT_FILE"),
+        ) {
+            (None, None, None) => None,
+            (Some(url), Some(ca_file), Some(client_file)) => {
+                if !url.starts_with("https://") {
+                    return Err(ConfigError::InvalidKeyServiceUrl);
+                }
+                Some(KeyServiceSettings {
+                    url,
+                    ca_file,
+                    client_file,
+                })
+            }
+            _ => return Err(ConfigError::KeyServiceIncomplete),
+        };
         let smtp_url = optional("ORBYN_SMTP_URL");
         let mail_from = optional("ORBYN_MAIL_FROM");
         if smtp_url.is_some() && mail_from.is_none() {
@@ -329,6 +373,7 @@ impl Config {
             account_url,
             smtp_ca_file,
             signup,
+            key_service,
         })
     }
 }
@@ -344,6 +389,60 @@ mod tests {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         move |name| map.get(name).cloned()
+    }
+
+    #[test]
+    fn the_key_service_is_all_three_settings_or_none_and_https() {
+        let base = [("DATABASE_URL", "postgres://x")];
+        let with = |extra: &[(&str, &str)]| {
+            let mut all = base.to_vec();
+            all.extend_from_slice(extra);
+            Config::from_lookup(lookup(&all))
+        };
+        assert_eq!(with(&[]).expect("none").key_service, None);
+        let three = [
+            ("ORBYN_KEYSERVICE_URL", "https://keys.internal:8443"),
+            ("ORBYN_KEYSERVICE_CA_FILE", "/pki/ca.pem"),
+            ("ORBYN_KEYSERVICE_CLIENT_FILE", "/pki/client.pem"),
+        ];
+        let settings = with(&three).expect("all three").key_service.expect("some");
+        assert_eq!(
+            (
+                settings.url.as_str(),
+                settings.ca_file.as_str(),
+                settings.client_file.as_str()
+            ),
+            (
+                "https://keys.internal:8443",
+                "/pki/ca.pem",
+                "/pki/client.pem"
+            )
+        );
+        for missing in 0..3 {
+            let two: Vec<_> = three
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != missing)
+                .map(|(_, p)| *p)
+                .collect();
+            assert_eq!(
+                with(&two).err(),
+                Some(ConfigError::KeyServiceIncomplete),
+                "{two:?}"
+            );
+            assert_eq!(
+                with(&two[..1]).err(),
+                Some(ConfigError::KeyServiceIncomplete)
+            );
+        }
+        let plain = [
+            ("ORBYN_KEYSERVICE_URL", "http://keys.internal:8443"),
+            three[1],
+            three[2],
+        ];
+        assert_eq!(with(&plain).err(), Some(ConfigError::InvalidKeyServiceUrl));
+        assert!(ConfigError::KeyServiceIncomplete.is_operator_message());
+        assert!(ConfigError::InvalidKeyServiceUrl.is_operator_message());
     }
 
     #[test]
