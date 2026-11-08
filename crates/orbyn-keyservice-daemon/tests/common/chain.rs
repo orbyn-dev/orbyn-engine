@@ -59,6 +59,7 @@ pub struct Chain {
     pub time: Arc<AtomicU64>,
     pub log_public: [u8; 32],
     pub log_version: u32,
+    pub identity_public: [u8; 32],
     pub witnesses: Vec<W>,
 }
 
@@ -71,7 +72,7 @@ impl Chain {
     pub async fn with_log_version(witnesses: usize, version: u32) -> Self {
         let db = Db::new().await;
         let keys = KeyService::new(Spy::new(MemoryHsm::new(), false));
-        keys.init().expect("init");
+        let identity_public = keys.init().expect("init");
         let log_public = keys.init_log_key(version).expect("log key");
         let time = Arc::new(AtomicU64::new(T0));
         let clock = time.clone();
@@ -88,6 +89,7 @@ impl Chain {
             time,
             log_public,
             log_version: version,
+            identity_public,
             witnesses: Vec::new(),
         };
         for i in 0..witnesses {

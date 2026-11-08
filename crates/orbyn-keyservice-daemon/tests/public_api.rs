@@ -1074,3 +1074,131 @@ async fn a_request_that_times_out_still_carries_the_headers() {
     );
     c.finish().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs ORBYN_KEYSERVICE_DATABASE_URL"]
+async fn the_clients_verifier_accepts_what_the_real_service_serves_and_refuses_a_wrong_pin() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    use orbyn_client::{LogAnswers, ServiceKeyPins, ServiceKeyRefusal, verify_service_key};
+    use orbyn_translog::verify::{Pins, Refusal};
+
+    let (c, public_key) = published_log().await;
+    let served = Served::start(&c, config(&c, 2)).await;
+    let (_, _, lookup) = served
+        .get(&format!("/v1/log/lookup/{}?map=service", hex(&public_key)))
+        .await;
+    let (_, _, entries) = served
+        .get(&format!(
+            "/v1/log/entries?service_public_key={}",
+            hex(&public_key)
+        ))
+        .await;
+    let account = [1u8; 16];
+    let record = c
+        .state
+        .store
+        .service_key(&account)
+        .await
+        .expect("read")
+        .expect("a key");
+    let uuid = {
+        let h = hex(&account);
+        format!(
+            "{}-{}-{}-{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[12..16],
+            &h[16..20],
+            &h[20..]
+        )
+    };
+    let offered = orbyn_contracts::ServiceKeyCertification {
+        account_id: uuid,
+        identity_version: record.identity_version,
+        public_key: B64.encode(record.public),
+        statement_hash: B64.encode(orbyn_crypto::service_key_statement_hash(&record.statement)),
+        signature: B64.encode(record.signature),
+        entry_index: record.entry_index,
+    };
+    let pins = ServiceKeyPins {
+        log: Pins {
+            log_keys: vec![(c.log_version, c.log_public)],
+            witnesses: c.witnesses.iter().map(|w| w.public).collect(),
+            threshold: 2,
+        },
+        identity_keys: vec![(1, c.identity_public)],
+    };
+    let (lookup, entries) = (lookup.to_string(), entries.to_string());
+    let answers = LogAnswers {
+        lookup: &lookup,
+        entry_pages: &[entries.as_str()],
+        consistency: None,
+    };
+    // A device that already verified another key refuses this one (trust on first use otherwise).
+    assert!(matches!(
+        verify_service_key(
+            &pins,
+            account,
+            &offered,
+            &answers,
+            Some(&[2; 33]),
+            None,
+            c.now()
+        ),
+        Err(ServiceKeyRefusal::KeyChanged)
+    ));
+    let verified = verify_service_key(&pins, account, &offered, &answers, None, None, c.now())
+        .expect("the real service's bytes verify");
+    assert_eq!(verified.public_key, public_key);
+    assert_eq!(verified.entry_index, record.entry_index);
+
+    // A device that pinned another identity, another log key or another witness set refuses.
+    let mut other_identity = pins.clone();
+    other_identity.identity_keys = vec![(1, [9; 32])];
+    assert!(matches!(
+        verify_service_key(
+            &other_identity,
+            account,
+            &offered,
+            &answers,
+            None,
+            None,
+            c.now()
+        ),
+        Err(ServiceKeyRefusal::BadIdentitySignature)
+    ));
+    let mut other_log = pins.clone();
+    other_log.log.log_keys = vec![(c.log_version, [9; 32])];
+    assert!(matches!(
+        verify_service_key(&other_log, account, &offered, &answers, None, None, c.now()),
+        Err(ServiceKeyRefusal::Log(Refusal::BadLogSignature))
+    ));
+    let mut other_witnesses = pins.clone();
+    other_witnesses.log.witnesses = vec![[7; 32], [8; 32], [9; 32]];
+    assert!(matches!(
+        verify_service_key(
+            &other_witnesses,
+            account,
+            &offered,
+            &answers,
+            None,
+            None,
+            c.now()
+        ),
+        Err(ServiceKeyRefusal::Log(Refusal::NotEnoughWitnesses))
+    ));
+    // Two hours and a second later, the same bytes are stale.
+    assert!(matches!(
+        verify_service_key(
+            &pins,
+            account,
+            &offered,
+            &answers,
+            None,
+            None,
+            c.now() + 2 * 3600 * 1000 + 1000
+        ),
+        Err(ServiceKeyRefusal::Log(Refusal::StaleHead))
+    ));
+}

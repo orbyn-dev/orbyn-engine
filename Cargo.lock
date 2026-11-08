@@ -1808,12 +1808,14 @@ name = "orbyn-client"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "ed25519-dalek",
  "getrandom 0.4.3",
  "orbyn-auth-client",
  "orbyn-contracts",
  "orbyn-crypto",
  "orbyn-planner",
  "orbyn-sync",
+ "orbyn-translog",
  "serde",
  "serde_json",
  "thiserror",
@@ -1905,8 +1907,11 @@ name = "orbyn-keyservice-daemon"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "hyper",
  "hyper-util",
+ "orbyn-client",
+ "orbyn-contracts",
  "orbyn-crypto",
  "orbyn-keyservice",
  "orbyn-keyservice-client",
