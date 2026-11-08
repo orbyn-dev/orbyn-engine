@@ -35,7 +35,7 @@ pub struct CosignMaterial {
 }
 
 /// The ranges a consistency proof asks for, recorded so they can be read before the proof is built.
-struct Recorder(RefCell<Vec<(u64, u64)>>, u64);
+pub(crate) struct Recorder(pub(crate) RefCell<Vec<(u64, u64)>>, pub(crate) u64);
 
 impl Subtrees for Recorder {
     fn size(&self) -> u64 {
@@ -48,15 +48,15 @@ impl Subtrees for Recorder {
 }
 
 /// The stored complete subtrees a range is made of.
-struct Nodes {
-    size: u64,
-    stored: HashMap<(i16, u64), Hash>,
+pub(crate) struct Nodes {
+    pub(crate) size: u64,
+    pub(crate) stored: HashMap<(i16, u64), Hash>,
 }
 
 /// The `(level, index)` of the stored nodes a range's root is built from: the range itself when it
 /// is one aligned complete subtree, otherwise its two halves (split at the largest power of two
 /// below its length, as the RFC does).
-fn needed(start: u64, end: u64, out: &mut Vec<(i16, u64)>) {
+pub(crate) fn needed(start: u64, end: u64, out: &mut Vec<(i16, u64)>) {
     let n = end - start;
     if n.is_power_of_two() && start.is_multiple_of(n) {
         out.push((n.trailing_zeros() as i16, start / n));
@@ -85,6 +85,50 @@ impl Subtrees for Nodes {
     }
 }
 
+/// The stored complete subtrees at these `(level, index)` positions, in one query.
+pub(crate) async fn load_nodes(
+    conn: &mut PgConnection,
+    mut wanted: Vec<(i16, u64)>,
+) -> Result<HashMap<(i16, u64), Hash>> {
+    wanted.sort_unstable();
+    wanted.dedup();
+    let levels: Vec<i16> = wanted.iter().map(|(level, _)| *level).collect();
+    let mut indexes = Vec::with_capacity(wanted.len());
+    for (_, idx) in &wanted {
+        indexes.push(to_i64(*idx)?);
+    }
+    let rows = sqlx::query(
+        "SELECT level, idx, hash FROM log_nodes WHERE (level, idx) IN \
+         (SELECT * FROM unnest($1::smallint[], $2::bigint[]))",
+    )
+    .bind(levels)
+    .bind(indexes)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut stored = HashMap::new();
+    for row in rows {
+        stored.insert(
+            (
+                row.try_get::<i16, _>("level")?,
+                to_u64(row.try_get("idx")?)?,
+            ),
+            to_hash(row.try_get("hash")?, "log node")?,
+        );
+    }
+    if stored.len() != wanted.len() {
+        return Err(StoreError::Corrupt("a log node is missing"));
+    }
+    Ok(stored)
+}
+
+pub(crate) async fn consistency_in(
+    conn: &mut PgConnection,
+    old: u64,
+    new: u64,
+) -> Result<Vec<Hash>> {
+    consistency(conn, old, new).await
+}
+
 async fn consistency(conn: &mut PgConnection, old: u64, new: u64) -> Result<Vec<Hash>> {
     if old == 0 || old == new {
         return Ok(Vec::new());
@@ -96,18 +140,7 @@ async fn consistency(conn: &mut PgConnection, old: u64, new: u64) -> Result<Vec<
     for (start, end) in recorder.0.into_inner() {
         needed(start, end, &mut wanted);
     }
-    wanted.sort_unstable();
-    wanted.dedup();
-    let mut stored = HashMap::new();
-    for (level, idx) in wanted {
-        let row = sqlx::query("SELECT hash FROM log_nodes WHERE level = $1 AND idx = $2")
-            .bind(level)
-            .bind(to_i64(idx)?)
-            .fetch_optional(&mut *conn)
-            .await?
-            .ok_or(StoreError::Corrupt("a log node is missing"))?;
-        stored.insert((level, idx), to_hash(row.try_get("hash")?, "log node")?);
-    }
+    let stored = load_nodes(conn, wanted).await?;
     consistency_proof(&Nodes { size: new, stored }, old, new)
         .map_err(|_| StoreError::Corrupt("a consistency proof"))
 }

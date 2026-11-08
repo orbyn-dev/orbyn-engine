@@ -40,6 +40,8 @@ Make a tunnel named `orbyn-staging`, separate from orbyn.dev's, and copy its tok
 
 Both are the container ports, reached by name inside the staging compose network. orbyn.dev's tunnel is not touched.
 
+For the key service's public API (the `smoke` profile) add a third: `log-staging.orbyn.dev` -> `http://keyservice:8480`. It is the key service's public listener only; the internal mutual-TLS API (port 8443) has no route through the tunnel and no published port. The key service is on its own `ks` network (with its database) and on `ks-public`, which only `cloudflared` shares, and not on the default network: the record server and the planner cannot reach port 8480, so none of them can send it a forged `cf-connecting-ip`. Production uses `log.orbyn.dev` the same way.
+
 ## Settings
 
 ```sh
@@ -51,7 +53,7 @@ cp .env.staging.example .env.staging     # on the host, never committed, never s
 | `POSTGRES_PASSWORD` | `openssl rand -hex 24` |
 | `ORBYN_AUTH_SETUP` | once, after `docker compose --env-file .env.staging -f compose.staging.yaml build migrate`: `docker compose --env-file .env.staging -f compose.staging.yaml run --rm --no-deps server auth-setup`. Never make a new one after sign-ups exist: every password stops working. |
 | `CLOUDFLARE_TUNNEL_TOKEN` | the staging tunnel's token from Cloudflare. Empty means no tunnel. |
-| `SERVER_PORT`, `PLANNER_PORT`, `PLANNER_DIR`, `CLOUDFLARED_IMAGE` | optional; defaults `18080`, `18081`, `../orbyn-planner`, `cloudflare/cloudflared:latest` |
+| `SERVER_PORT`, `PLANNER_PORT`, `PLANNER_DIR`, `CLOUDFLARED_IMAGE`, `KS_PUBLIC_PORT` | optional; defaults `18080`, `18081`, `../orbyn-planner`, `cloudflare/cloudflared:latest`, `18480` (the key service public API, smoke profile) |
 | `KS_OWNER_PASSWORD`, `KS_RUNTIME_PASSWORD` | smoke only: `openssl rand -hex 24` each |
 | `KS_HSM_PIN`, `KS_HSM_SO_PIN` | smoke only: `openssl rand -hex 12` each |
 
@@ -126,6 +128,15 @@ id=$(openssl rand -hex 16)
 5. **SIGHUP.** `dc --profile smoke run --rm ks-setup renew-cert`, then `dc --profile smoke kill -s HUP keyservice`. `dc --profile smoke logs keyservice` shows "reloaded the certificates", and step 1 still works.
 
 Stop it with `dc --profile smoke down`; add `-v` only to throw the smoke data away.
+
+### The public API on staging
+
+With the smoke profile up and the `log-staging.orbyn.dev` route in place (the key service sets `ORBYN_KS_PUBLIC_BIND=0.0.0.0:8480`, `ORBYN_KS_CLIENT_IP_HEADER=cf-connecting-ip` and `ORBYN_KS_ALLOWED_ORIGINS=https://account-staging.orbyn.dev`):
+
+1. `curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18480/v1/keys` answers 200 (the port is published on loopback only; `KS_PUBLIC_PORT` changes it).
+2. Before the first head is published `curl -sS -i http://127.0.0.1:18480/v1/log/head` answers 503 `no_published_head` with `Retry-After: 60`; after one interval (60 seconds) with the witnesses up it answers 200 with a head and two cosignatures.
+3. `curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18480/internal/v1/service-keys` answers 404: no internal path is served here.
+4. Through the tunnel the same three checks against `https://log-staging.orbyn.dev`.
 
 ## If a database was made before the invite gate merged
 

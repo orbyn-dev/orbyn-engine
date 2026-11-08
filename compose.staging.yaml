@@ -123,6 +123,7 @@ services:
     restart: unless-stopped
     # The token goes in the environment, not the command line, so it stays out of `docker ps`.
     command: ["tunnel", "--no-autoupdate", "run"]
+    networks: [default, ks-public]
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
       TUNNEL_METRICS: 127.0.0.1:2000
@@ -142,6 +143,7 @@ services:
     image: postgres:17-bookworm@sha256:665dc7b37ac52a17e298511414c21d23ffa4e6a6ef6225b3e5d59c7afb35e994
     profiles: [smoke]
     restart: unless-stopped
+    networks: [ks]
     environment:
       POSTGRES_USER: orbyn_ks_owner
       POSTGRES_DB: orbyn_keyservice
@@ -180,6 +182,7 @@ services:
     profiles: [smoke]
     entrypoint: ["/usr/local/bin/smoke-entry.sh"]
     command: ["migrate"]
+    networks: [ks]
     environment:
       ORBYN_KEYSERVICE_MIGRATE_DATABASE_URL: postgres://orbyn_ks_owner:${KS_OWNER_PASSWORD:-}@ks-postgres:5432/orbyn_keyservice
       ORBYN_KEYSERVICE_RUNTIME_ROLE: orbyn_ks_runtime
@@ -193,10 +196,21 @@ services:
     restart: unless-stopped
     entrypoint: ["/usr/local/bin/smoke-entry.sh"]
     command: ["serve"]
+    # On the private `ks` network (its database) and on `ks-public`, which only cloudflared shares:
+    # the record server and the planner (default network) cannot reach the public listener or
+    # send it a forged cf-connecting-ip.
+    networks: [ks, ks-public]
+    # Loopback only, like everything else here. The internal port (8443) is not published.
+    ports:
+      - "127.0.0.1:${KS_PUBLIC_PORT:-18480}:8480"
     environment:
       ORBYN_KEYSERVICE_DATABASE_URL: postgres://orbyn_ks_runtime:${KS_RUNTIME_PASSWORD:-}@ks-postgres:5432/orbyn_keyservice
       ORBYN_HSM_PIN: ${KS_HSM_PIN:-}
       ORBYN_KS_INTERNAL_BIND: 0.0.0.0:8443
+      # The public API: plain HTTP, behind the tunnel (log-staging.orbyn.dev -> http://keyservice:8480).
+      ORBYN_KS_PUBLIC_BIND: 0.0.0.0:8480
+      ORBYN_KS_CLIENT_IP_HEADER: cf-connecting-ip
+      ORBYN_KS_ALLOWED_ORIGINS: https://account-staging.orbyn.dev
       # Witness settings are read by the head publisher; a build without it ignores them.
       ORBYN_KS_WITNESS_THRESHOLD: "2"
       ORBYN_KS_LOG_KEY_VERSION: "1"
@@ -236,6 +250,12 @@ services:
       - ks-witness-keys:/witness-keys:ro
       - ks-witness-2:/witness-state
     depends_on: [keyservice]
+
+networks:
+  # The key service and its database. Nothing else is on it.
+  ks:
+  # The key service's public API and the tunnel, and nothing else.
+  ks-public:
 
 volumes:
   postgres:

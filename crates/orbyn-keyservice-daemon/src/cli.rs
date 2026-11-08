@@ -14,7 +14,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::publisher::{Publisher, PublisherError, PublisherSettings};
 use crate::tls::{Reloadable, TlsFiles};
-use crate::{State, TracingAudit, api, messages, system_now_ms, tls};
+use crate::{State, TracingAudit, api, messages, public, system_now_ms, tls};
 
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
 
@@ -197,6 +197,36 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|_| messages::cannot_listen(&bind_text))?;
+    // The public API, when it has an address: its own plain-HTTP listener, apart from the
+    // internal one, behind the tunnel that ends TLS. Bound before anything runs.
+    let public_settings = public::PublicSettings::parse(env)?;
+    let public_listener = match &public_settings.bind {
+        None => None,
+        Some((address, text)) => Some(
+            tokio::net::TcpListener::bind(address)
+                .await
+                .map_err(|_| messages::cannot_listen_public(text))?,
+        ),
+    };
+    let keys_info = public::KeysInfo {
+        log_keys: publisher
+            .as_ref()
+            .and_then(|p| {
+                keys.log_key_public(p.log_key_version)
+                    .ok()
+                    .map(|key| vec![(p.log_key_version, key)])
+            })
+            .unwrap_or_default(),
+        identity_keys: keys
+            .identity_public(version)
+            .map(|key| vec![(version, key)])
+            .unwrap_or_default(),
+        witnesses: publisher
+            .as_ref()
+            .map(|p| p.witnesses.iter().map(|(_, key)| *key).collect())
+            .unwrap_or_default(),
+        threshold: publisher.as_ref().map_or(0, |p| p.threshold),
+    };
     let state = Arc::new(State {
         store,
         keys,
@@ -204,6 +234,8 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
         audit: Arc::new(TracingAudit),
         now_ms: Arc::new(system_now_ms),
     });
+    // Old allowance rows of addresses that never come back are removed, in this process too.
+    tokio::spawn(crate::prune_rate_events_forever(state.store.clone()));
     // The publisher runs beside the API, in this process.
     if let Some(settings) = publisher {
         let publisher = Publisher::new(
@@ -216,9 +248,26 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
         let interval = settings.interval;
         tokio::spawn(async move { publisher.run(interval).await });
     }
+    let public_task = public_listener.map(|listener| {
+        public::serve(
+            listener,
+            public::router(
+                state.store.clone(),
+                public::PublicConfig {
+                    allowed_origins: public_settings.allowed_origins.clone(),
+                    client_ip_header: public_settings.client_ip_header.clone(),
+                    keys: keys_info,
+                    request_timeout: None,
+                },
+            ),
+        )
+    });
     let server = tls::serve(listener, tls.clone(), api::router(state))
         .map_err(|_| messages::cannot_listen(&bind_text))?;
     wait_for_shutdown(&tls).await?;
+    if let Some(task) = public_task {
+        task.abort();
+    }
     server.stop().await;
     Ok(())
 }

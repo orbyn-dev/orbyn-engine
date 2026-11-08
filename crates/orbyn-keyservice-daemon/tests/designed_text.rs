@@ -1,5 +1,6 @@
 //! The operator text, word for word from Account Designs v51 (orbyn-designs#45, frames ks-help,
 //! ks-help-settings, ks-init, ks-init-log-key, ks-config-errors, ks-migrate, ks-serve, ks-reload):
+//! plus v61 (orbyn-designs#91) for the public API's settings in ks-serve and ks-help-settings):
 //! each expected string below is copied from the design's own block, so a changed word fails here.
 
 use orbyn_keyservice_daemon::messages;
@@ -126,6 +127,23 @@ fn each_message_is_the_designed_text() {
         messages::cannot_listen("10.0.0.5:8443"),
         "error: the key service can't listen on 10.0.0.5:8443\n  Another program may be using that port, or the address isn't one this machine has.\n  Choose another with ORBYN_KS_INTERNAL_BIND."
     );
+    // The public API's settings.
+    assert_eq!(
+        messages::public_bind_invalid(),
+        "error: ORBYN_KS_PUBLIC_BIND is not a valid address\n  Use host:port, for example 127.0.0.1:8480."
+    );
+    assert_eq!(
+        messages::cannot_listen_public("127.0.0.1:8480"),
+        "error: the key service can't listen on 127.0.0.1:8480\n  Another program may be using that port, or the address isn't one this machine has.\n  Choose another with ORBYN_KS_PUBLIC_BIND."
+    );
+    assert_eq!(
+        messages::cannot_listen_public("0.0.0.0:9000"),
+        "error: the key service can't listen on 0.0.0.0:9000\n  Another program may be using that port, or the address isn't one this machine has.\n  Choose another with ORBYN_KS_PUBLIC_BIND."
+    );
+    assert_eq!(
+        messages::client_ip_header_invalid(),
+        "error: ORBYN_KS_CLIENT_IP_HEADER is not a header name\n  Use a header name such as cf-connecting-ip.\n  Set it only if your ingress sets this header and removes it from outside requests."
+    );
     assert_eq!(
         messages::cannot_watch_reload_signal(),
         "error: the key service can't watch for the reload signal\n  The operating system refused to install the signal handler. Start the service from a service manager or a normal shell, then try again."
@@ -136,7 +154,7 @@ fn each_message_is_the_designed_text() {
 fn the_help_is_the_designed_help_then_the_designed_settings() {
     assert_eq!(
         messages::HELP,
-        "Runs the key service that holds the service keys for Standard protection in a hardware security module (HSM).\n\nUsage: orbyn-keyservice <COMMAND>\n\nCommands:\n  serve         Run the key service\n  migrate       Create or update the database tables\n  init          Create the service identity key in the HSM\n  init-log-key  Create log key 1 in the HSM and print its public key\n  help          Print this message or the help of a command\n\nOptions:\n  -h, --help  Print help\n\nSettings (environment variables). Only ORBYN_KS_IDENTITY_VERSION has a default (1). The service does not start without the others.\n\n  ORBYN_KEYSERVICE_DATABASE_URL          Database the key service uses (never printed)\n  ORBYN_KS_INTERNAL_BIND                 Internal address to listen on\n  ORBYN_KS_TLS_CERT                      Path to the server certificate file\n  ORBYN_KS_TLS_KEY                       Path to the server private key file\n  ORBYN_KS_CLIENT_CA                     Path to the authority file that signs client certificates\n  ORBYN_KS_IDENTITY_VERSION              Version of the service identity key in the HSM to use [default: 1]\n  ORBYN_KEYSERVICE_MIGRATE_DATABASE_URL  Owner database connection, used only by migrate (never printed)\n  ORBYN_KEYSERVICE_RUNTIME_ROLE          Database role the service runs as; not a superuser, not a member of the owner role\n  ORBYN_HSM_MODULE                       Path to the HSM's PKCS#11 module\n  ORBYN_HSM_SLOT                         HSM slot that holds the keys\n  ORBYN_HSM_PIN                          PIN for the HSM slot (never printed)\n\nHead publisher settings:\n\n  ORBYN_KS_WITNESSES                     Witness URLs (https)\n  ORBYN_KS_WITNESS_KEYS                  Public keys of the witnesses, 64 hex digits each\n  ORBYN_KS_WITNESS_THRESHOLD             How many witnesses must cosign (more than half)\n  ORBYN_KS_LOG_KEY_VERSION               Version of the log key in the HSM to sign heads with\n  ORBYN_KS_HEAD_INTERVAL_SECS            How often to publish a head, 60 to 900 seconds\n"
+        "Runs the key service that holds the service keys for Standard protection in a hardware security module (HSM).\n\nUsage: orbyn-keyservice <COMMAND>\n\nCommands:\n  serve         Run the key service\n  migrate       Create or update the database tables\n  init          Create the service identity key in the HSM\n  init-log-key  Create log key 1 in the HSM and print its public key\n  help          Print this message or the help of a command\n\nOptions:\n  -h, --help  Print help\n\nSettings (environment variables). Only ORBYN_KS_IDENTITY_VERSION has a default (1). The service does not start without the others.\n\n  ORBYN_KEYSERVICE_DATABASE_URL          Database the key service uses (never printed)\n  ORBYN_KS_INTERNAL_BIND                 Internal address to listen on\n  ORBYN_KS_TLS_CERT                      Path to the server certificate file\n  ORBYN_KS_TLS_KEY                       Path to the server private key file\n  ORBYN_KS_CLIENT_CA                     Path to the authority file that signs client certificates\n  ORBYN_KS_IDENTITY_VERSION              Version of the service identity key in the HSM to use [default: 1]\n  ORBYN_KEYSERVICE_MIGRATE_DATABASE_URL  Owner database connection, used only by migrate (never printed)\n  ORBYN_KEYSERVICE_RUNTIME_ROLE          Database role the service runs as; not a superuser, not a member of the owner role\n  ORBYN_HSM_MODULE                       Path to the HSM's PKCS#11 module\n  ORBYN_HSM_SLOT                         HSM slot that holds the keys\n  ORBYN_HSM_PIN                          PIN for the HSM slot (never printed)\n\nHead publisher settings:\n\n  ORBYN_KS_WITNESSES                     Witness URLs (https)\n  ORBYN_KS_WITNESS_KEYS                  Public keys of the witnesses, 64 hex digits each\n  ORBYN_KS_WITNESS_THRESHOLD             How many witnesses must cosign (more than half)\n  ORBYN_KS_LOG_KEY_VERSION               Version of the log key in the HSM to sign heads with\n  ORBYN_KS_HEAD_INTERVAL_SECS            How often to publish a head, 60 to 900 seconds\n\nPublic API settings:\n\n  ORBYN_KS_PUBLIC_BIND                   Address for the public API (host:port). Without it there is no public API.\n  ORBYN_KS_ALLOWED_ORIGINS               Origins the planner may call from, exact match, separated by commas. No wildcard.\n  ORBYN_KS_CLIENT_IP_HEADER              Header your ingress sets with the client address, for example cf-connecting-ip.\n                                         Trusted only when set.\n"
     );
 }
 
@@ -165,4 +183,23 @@ fn the_reload_lines_are_the_designed_lines() {
         messages::RELOAD_FAILED,
         "could not reload the certificates, still using the old ones"
     );
+}
+
+#[test]
+fn the_wrapped_help_line_continues_under_its_description_and_the_new_settings_have_no_default() {
+    let lines: Vec<&str> = messages::HELP.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("ORBYN_KS_CLIENT_IP_HEADER"))
+        .expect("the setting is listed");
+    // The description starts in column 41; the continuation starts there too.
+    assert_eq!(lines[at].find("Header your"), Some(41));
+    assert_eq!(
+        lines[at + 1],
+        format!("{}Trusted only when set.", " ".repeat(41))
+    );
+    let block = lines.iter().skip_while(|l| **l != "Public API settings:");
+    for line in block {
+        assert!(!line.contains("[default"), "{line}");
+    }
 }

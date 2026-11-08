@@ -23,11 +23,13 @@
 mod head;
 mod log;
 mod map;
+mod public;
 mod publish;
 mod service_keys;
 
 pub use head::StoredHead;
 pub use log::Appended;
+pub use public::{ChainEntry, ChainPage, LookupView, PAGE, PublishedHead};
 pub use publish::{CosignEntryData, CosignMaterial};
 pub use service_keys::{
     CreateError, NewServiceKey, ServiceKeyOutcome, ServiceKeyRecord, ServiceKeyState,
@@ -493,6 +495,30 @@ impl Store {
         }
         tx.commit().await?;
         Ok(allowed)
+    }
+
+    /// Removes every `rate_events` row older than `max_age_secs`: the rows of blocks and accounts
+    /// that never come back, which `allow` (which prunes only its own subject) leaves behind.
+    /// Returns how many went. `max_age_secs` must be at least the longest window any caller counts
+    /// over, or a limit would forget requests it should still count.
+    pub async fn prune_rate_events(&self, max_age_secs: u64) -> Result<u64> {
+        let age = i64::try_from(max_age_secs).map_err(|_| StoreError::BadEntry)?;
+        // The same bounds a write has: a stuck lock or statement is an error, not a queue.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+        )
+        .bind(&self.timeouts.lock)
+        .bind(&self.timeouts.statement)
+        .execute(&mut *tx)
+        .await?;
+        let done =
+            sqlx::query("DELETE FROM rate_events WHERE at < now() - make_interval(secs => $1)")
+                .bind(age as f64)
+                .execute(&mut *tx)
+                .await?;
+        tx.commit().await?;
+        Ok(done.rows_affected())
     }
 
     /// The newest **stored** head, which may not be published: it can be waiting for its
