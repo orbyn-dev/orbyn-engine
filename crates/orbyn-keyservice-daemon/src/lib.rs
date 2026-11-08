@@ -59,6 +59,26 @@ impl Audit for TracingAudit {
 /// How many creates one account may ask for in an hour.
 pub const CREATES_PER_HOUR: u32 = 10;
 
+/// Every limit here counts over one hour, so a `rate_events` row older than this is never read
+/// again. The prune task removes them, for blocks and accounts that never come back.
+pub const RATE_RETENTION_SECS: u64 = 2 * 60 * 60;
+
+/// How often the prune task runs.
+pub const PRUNE_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Removes old `rate_events` rows every [`PRUNE_EVERY`], for as long as the task runs. A failure
+/// is logged and tried again next time.
+pub async fn prune_rate_events_forever(store: Store) {
+    loop {
+        match store.prune_rate_events(RATE_RETENTION_SECS).await {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(event = "rate_events_pruned", removed),
+            Err(error) => tracing::warn!(event = "rate_events_prune_failed", %error),
+        }
+        tokio::time::sleep(PRUNE_EVERY).await;
+    }
+}
+
 /// Everything the endpoints share.
 pub struct State<H: Hsm> {
     pub store: Store,

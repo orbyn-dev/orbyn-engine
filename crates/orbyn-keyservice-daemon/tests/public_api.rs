@@ -21,6 +21,10 @@ struct Served {
     url: String,
     http: reqwest::Client,
     task: tokio::task::JoinHandle<()>,
+    /// When set, each request claims a new /24 in the trusted header (the server must be
+    /// configured with `cf-connecting-ip`), so a test with many requests is not limited.
+    rotate: std::sync::atomic::AtomicU32,
+    rotating: bool,
 }
 
 impl Drop for Served {
@@ -40,6 +44,8 @@ impl Served {
             url,
             http: reqwest::Client::new(),
             task,
+            rotate: std::sync::atomic::AtomicU32::new(0),
+            rotating: false,
         }
     }
 
@@ -53,6 +59,12 @@ impl Served {
         headers: &[(&str, &str)],
     ) -> (StatusCode, reqwest::header::HeaderMap, Value) {
         let mut request = self.http.get(format!("{}{path}", self.url));
+        if self.rotating {
+            let n = self
+                .rotate
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            request = request.header("cf-connecting-ip", format!("10.{}.{}.1", n / 250, n % 250));
+        }
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
@@ -75,6 +87,7 @@ fn config(c: &Chain, threshold: usize) -> PublicConfig {
             witnesses: c.witnesses.iter().map(|w| w.public).collect(),
             threshold,
         },
+        request_timeout: None,
     }
 }
 
@@ -183,7 +196,7 @@ async fn the_public_listener_has_five_get_routes_and_no_internal_path_is_reachab
             ("GET", "/v1/log/head"),
             ("GET", "/v1/log/consistency"),
             ("GET", "/v1/log/entries"),
-            ("GET", "/v1/log/lookup/{map_key}"),
+            ("GET", "/v1/log/lookup/{service_public_key}"),
             ("GET", "/v1/keys"),
         ]
     );
@@ -226,8 +239,8 @@ async fn the_public_listener_has_five_get_routes_and_no_internal_path_is_reachab
     let paths = [
         "/v1/log/head",
         "/v1/log/consistency?from=1&to=1",
-        "/v1/log/entries?map_key=00",
-        &format!("/v1/log/lookup/{}", hex(&[0u8; 32])),
+        "/v1/log/entries?service_public_key=00",
+        &format!("/v1/log/lookup/{}", hex(&[0u8; 33])),
         "/v1/keys",
     ];
     for path in paths {
@@ -282,8 +295,8 @@ async fn with_nothing_published_the_proof_routes_say_so_and_keys_still_answers()
     for path in [
         "/v1/log/head".to_owned(),
         "/v1/log/consistency?from=1&to=1".to_owned(),
-        format!("/v1/log/entries?map_key={}", hex(&[1; 32])),
-        format!("/v1/log/lookup/{}", hex(&[1; 32])),
+        format!("/v1/log/entries?service_public_key={}", hex(&[1; 33])),
+        format!("/v1/log/lookup/{}", hex(&[1; 33])),
     ] {
         let (status, headers, body) = served.get(&path).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
@@ -315,7 +328,7 @@ async fn a_client_verifies_the_head_a_lookup_and_the_chain_from_the_served_bytes
 
     // The lookup: head, map proof against the head's root, the newest entry in the log.
     let (status, headers, body) = served
-        .get(&format!("/v1/log/lookup/{}?map=service", hex(&map_key)))
+        .get(&format!("/v1/log/lookup/{}?map=service", hex(&public_key)))
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["cache-control"], "public, max-age=60");
@@ -340,8 +353,8 @@ async fn a_client_verifies_the_head_a_lookup_and_the_chain_from_the_served_bytes
     // The chain page agrees, with the same proofs.
     let (_, _, page) = served
         .get(&format!(
-            "/v1/log/entries?map_key={}&map=service",
-            hex(&map_key)
+            "/v1/log/entries?service_public_key={}&map=service",
+            hex(&public_key)
         ))
         .await;
     let page_head = verify_head(&page, &c, 2);
@@ -352,9 +365,10 @@ async fn a_client_verifies_the_head_a_lookup_and_the_chain_from_the_served_bytes
     assert_eq!(page["next"], Value::Null);
 
     // Absence: a valid proof, no entry, and the same fields.
-    let absent = [77u8; 32];
+    let absent_public = [77u8; 33];
+    let absent = service_account_map_key(&absent_public);
     let (status, _, body) = served
-        .get(&format!("/v1/log/lookup/{}", hex(&absent)))
+        .get(&format!("/v1/log/lookup/{}", hex(&absent_public)))
         .await;
     assert_eq!(status, StatusCode::OK);
     let head = verify_head(&body, &c, 2);
@@ -402,7 +416,7 @@ async fn a_tampered_proof_a_wrong_key_and_too_few_cosignatures_all_fail_the_clie
     let served = Served::start(&c, config(&c, 2)).await;
     let map_key = service_account_map_key(&public_key);
     let (_, _, body) = served
-        .get(&format!("/v1/log/lookup/{}", hex(&map_key)))
+        .get(&format!("/v1/log/lookup/{}", hex(&public_key)))
         .await;
     let head = UnsignedHead::decode(&bytes(&body["head"])).expect("head");
     let entry_bytes = bytes(&body["latest"]["entry"]);
@@ -494,7 +508,7 @@ async fn what_is_stored_but_not_published_is_never_served() {
     assert_eq!(now["head"], first["head"]);
     let late_map_key = service_account_map_key(&late_key);
     let (_, _, lookup) = served
-        .get(&format!("/v1/log/lookup/{}", hex(&late_map_key)))
+        .get(&format!("/v1/log/lookup/{}", hex(&late_key)))
         .await;
     assert_eq!(lookup["latest"], Value::Null);
     let head = UnsignedHead::decode(&bytes(&lookup["head"])).expect("head");
@@ -504,7 +518,10 @@ async fn what_is_stored_but_not_published_is_never_served() {
         Lookup::Absent
     );
     let (_, _, page) = served
-        .get(&format!("/v1/log/entries?map_key={}", hex(&late_map_key)))
+        .get(&format!(
+            "/v1/log/entries?service_public_key={}",
+            hex(&late_key)
+        ))
         .await;
     assert!(page["entries"].as_array().expect("entries").is_empty());
     // The size is the published head's: a consistency proof to the stored head's size is not found.
@@ -513,10 +530,7 @@ async fn what_is_stored_but_not_published_is_never_served() {
     assert_eq!(body["error"], "not_found");
     // The first key is still served as before.
     let (_, _, again) = served
-        .get(&format!(
-            "/v1/log/lookup/{}",
-            hex(&service_account_map_key(&public_key))
-        ))
+        .get(&format!("/v1/log/lookup/{}", hex(&public_key)))
         .await;
     assert_eq!(again["head"], first["head"]);
     // The witnesses return; the next cycle publishes, and now the second key appears.
@@ -525,7 +539,7 @@ async fn what_is_stored_but_not_published_is_never_served() {
     c.advance(MIN);
     c.publisher(2).publish_once().await.expect("cycle");
     let (_, _, lookup) = served
-        .get(&format!("/v1/log/lookup/{}", hex(&late_map_key)))
+        .get(&format!("/v1/log/lookup/{}", hex(&late_key)))
         .await;
     assert!(lookup["latest"].is_object());
     c.finish().await;
@@ -537,11 +551,11 @@ async fn the_cross_origin_contract_headers_and_cache_control() {
     let (c, public_key) = published_log().await;
     let served = Served::start(&c, config(&c, 2)).await;
     let allowed = "https://planner.example";
-    let map_key = hex(&service_account_map_key(&public_key));
+    let map_key = hex(&public_key);
     let paths = [
         "/v1/log/head".to_owned(),
         "/v1/log/consistency?from=1&to=1".to_owned(),
-        format!("/v1/log/entries?map_key={map_key}"),
+        format!("/v1/log/entries?service_public_key={map_key}"),
         format!("/v1/log/lookup/{map_key}"),
         "/v1/keys".to_owned(),
     ];
@@ -625,7 +639,7 @@ async fn the_cross_origin_contract_headers_and_cache_control() {
         "public, max-age=31536000, immutable"
     );
     assert_eq!(
-        cache(&format!("/v1/log/entries?map_key={map_key}")).await,
+        cache(&format!("/v1/log/entries?service_public_key={map_key}")).await,
         "public, max-age=60"
     );
     assert_eq!(
@@ -644,14 +658,14 @@ async fn the_cross_origin_contract_headers_and_cache_control() {
 async fn no_answer_carries_an_account_id_and_unknown_and_known_keys_have_one_shape() {
     let (c, public_key) = published_log().await;
     let served = Served::start(&c, config(&c, 2)).await;
-    let known = hex(&service_account_map_key(&public_key));
-    let unknown = hex(&[42u8; 32]);
+    let known = hex(&public_key);
+    let unknown = hex(&[42u8; 33]);
     let mut shapes = Vec::new();
     for path in [
         "/v1/log/head".to_owned(),
         "/v1/log/consistency?from=1&to=1".to_owned(),
-        format!("/v1/log/entries?map_key={known}"),
-        format!("/v1/log/entries?map_key={unknown}"),
+        format!("/v1/log/entries?service_public_key={known}"),
+        format!("/v1/log/entries?service_public_key={unknown}"),
         format!("/v1/log/lookup/{known}"),
         format!("/v1/log/lookup/{unknown}"),
         "/v1/keys".to_owned(),
@@ -695,19 +709,19 @@ async fn no_answer_carries_an_account_id_and_unknown_and_known_keys_have_one_sha
 #[ignore = "needs ORBYN_KEYSERVICE_DATABASE_URL"]
 async fn bad_requests_are_refused_and_a_chain_comes_in_pages_of_a_hundred() {
     let c = Chain::new(3).await;
-    // 300 entries over two accounts: 150 each, published in a head of 300 (the head builder takes
-    // up to a thousand), so the chain of account 100 is two pages.
-    c.append(300, 2, 1).await;
+    // One account with 150 entries (a chain of 150), published in one head: two pages.
+    let public_key = [7u8; 33];
+    append_chain(&c, &public_key, 150).await;
     c.publisher(2).publish_once().await.expect("cycle");
     let served = Served::start(&c, config(&c, 2)).await;
-    let key = hex(&[100u8; 32]);
+    let key = hex(&public_key);
     let mut seen = Vec::new();
     let mut after: Option<u64> = None;
     let mut pages = 0;
     loop {
         let path = match after {
-            None => format!("/v1/log/entries?map_key={key}"),
-            Some(a) => format!("/v1/log/entries?map_key={key}&after={a}"),
+            None => format!("/v1/log/entries?service_public_key={key}"),
+            Some(a) => format!("/v1/log/entries?service_public_key={key}&after={a}"),
         };
         let (status, _, page) = served.get(&path).await;
         assert_eq!(status, StatusCode::OK);
@@ -735,14 +749,27 @@ async fn bad_requests_are_refused_and_a_chain_comes_in_pages_of_a_hundred() {
     // Refusals.
     let bad = [
         "/v1/log/entries".to_owned(),
-        "/v1/log/entries?map_key=zz".to_owned(),
-        format!("/v1/log/entries?map_key={}", &key[..62]),
-        format!("/v1/log/entries?map_key={key}00"),
-        format!("/v1/log/entries?map_key={key}&map=other"),
-        format!("/v1/log/entries?map_key={key}&after=x"),
-        format!("/v1/log/entries?map_key={key}&after=-1"),
-        format!("/v1/log/entries?map_key={key}&pad={}", "a".repeat(600)),
+        "/v1/log/entries?service_public_key=zz".to_owned(),
+        // A map key (32 bytes) or any other length is not a service public key (33 bytes).
+        format!("/v1/log/entries?service_public_key={}", &key[..64]),
+        format!("/v1/log/entries?service_public_key={}", &key[..62]),
+        format!("/v1/log/entries?service_public_key={key}00"),
+        format!("/v1/log/entries?service_public_key={key}&map=other"),
+        // The identity map has nothing to look up by a service public key yet.
+        format!("/v1/log/entries?service_public_key={key}&map=identity"),
+        format!("/v1/log/lookup/{key}?map=identity"),
+        format!("/v1/log/entries?service_public_key={key}&after=x"),
+        format!("/v1/log/entries?service_public_key={key}&after=-1"),
+        // A query over 512 bytes is refused, not read as empty.
+        format!(
+            "/v1/log/entries?service_public_key={key}&pad={}",
+            "a".repeat(600)
+        ),
+        format!("/v1/log/lookup/{key}?pad={}", "a".repeat(600)),
+        format!("/v1/log/consistency?from=1&to=1&pad={}", "a".repeat(600)),
         "/v1/log/lookup/abc".to_owned(),
+        format!("/v1/log/lookup/{}", &key[..64]),
+        format!("/v1/log/lookup/{key}00"),
         format!("/v1/log/lookup/{key}?map=other"),
         "/v1/log/consistency".to_owned(),
         "/v1/log/consistency?from=0&to=1".to_owned(),
@@ -767,14 +794,14 @@ async fn requests_are_limited_per_address_block_and_lookup_and_entries_share_one
     let mut cfg = config(&c, 2);
     cfg.client_ip_header = public::header_name("CF-Connecting-IP");
     let served = Served::start(&c, cfg).await;
-    let key = hex(&service_account_map_key(&public_key));
+    let key = hex(&public_key);
     let from = |ip: &'static str| [("cf-connecting-ip", ip)];
     // 60 lookups and entries together from one /24; the 61st is refused, with Retry-After.
     for i in 0..60 {
         let path = if i % 2 == 0 {
             format!("/v1/log/lookup/{key}")
         } else {
-            format!("/v1/log/entries?map_key={key}")
+            format!("/v1/log/entries?service_public_key={key}")
         };
         let ip = if i % 3 == 0 {
             "198.51.100.1"
@@ -792,7 +819,7 @@ async fn requests_are_limited_per_address_block_and_lookup_and_entries_share_one
     assert_eq!(headers["retry-after"], "3600");
     let (status, _, _) = served
         .get_with(
-            &format!("/v1/log/entries?map_key={key}"),
+            &format!("/v1/log/entries?service_public_key={key}"),
             &from("198.51.100.9"),
         )
         .await;
@@ -849,7 +876,7 @@ async fn requests_are_limited_per_address_block_and_lookup_and_entries_share_one
 async fn without_a_trusted_header_the_connections_address_is_counted_and_a_header_is_ignored() {
     let (c, public_key) = published_log().await;
     let served = Served::start(&c, config(&c, 2)).await;
-    let key = hex(&service_account_map_key(&public_key));
+    let key = hex(&public_key);
     // Every request is from 127.0.0.1; a header that claims otherwise changes nothing.
     for i in 0..60 {
         let claim = format!("10.{}.0.1", i % 250);
@@ -897,4 +924,153 @@ fn address_blocks_are_a_v4_24_or_a_v6_64_and_a_mapped_address_is_its_v4() {
     assert_eq!(block("::ffff:192.0.2.9"), block("192.0.2.1"));
     // A v4 block and a v6 block never collide.
     assert_ne!(block("0.0.0.0"), block("::"));
+}
+
+/// Appends a chain of `n` certification-shaped entries for the account whose service public key is
+/// `public_key`, each naming the one before it.
+async fn append_chain(c: &Chain, public_key: &[u8; 33], n: usize) {
+    use orbyn_translog::{KIND_SERVICE_KEY, MapId};
+    let map_key = service_account_map_key(public_key);
+    let mut prev: Hash = [0; 32];
+    for i in 0..n {
+        let e = Entry {
+            kind: KIND_SERVICE_KEY,
+            map: MapId::Service,
+            map_key,
+            prev,
+            time_ms: c.now(),
+            fields: vec![(i % 251) as u8; 1],
+        };
+        prev = c.state.store.append(&e).await.expect("append").entry_hash;
+    }
+}
+
+/// The map key a lookup of `public_key` ends its absence proof at (the neighbouring leaf), or
+/// `None` when the proof is for a key that is present.
+async fn neighbour_of(served: &Served, public_key: &[u8; 33]) -> Option<[u8; 32]> {
+    let (status, _, body) = served
+        .get(&format!("/v1/log/lookup/{}", hex(public_key)))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let head = UnsignedHead::decode(&bytes(&body["head"])).expect("head");
+    let proof = Proof::decode(&bytes(&body["proof"])).expect("proof");
+    let own = service_account_map_key(public_key);
+    match verify_map(&head.service_map_root, &own, &proof).expect("valid") {
+        Lookup::Present(_) => None,
+        Lookup::Absent => match proof.end {
+            orbyn_translog::End::Leaf { key, .. } => Some(key),
+            orbyn_translog::End::Empty => None,
+        },
+    }
+}
+
+/// Every way a caller could try to open an account's entries with a map key it learned from an
+/// absence proof. None may return an entry or a `latest`.
+async fn assert_a_map_key_opens_nothing(served: &Served, map_key: &[u8; 32]) {
+    let raw = hex(map_key);
+    let mut paths = vec![
+        format!("/v1/log/lookup/{raw}"),
+        format!("/v1/log/entries?service_public_key={raw}"),
+        format!("/v1/log/lookup/{raw}?map=service"),
+    ];
+    // As the tail of a 33-byte key, with every plausible prefix byte: it is then some other
+    // service public key, whose own map key is a different hash.
+    for prefix in ["00", "02", "03"] {
+        paths.push(format!("/v1/log/lookup/{prefix}{raw}"));
+        paths.push(format!("/v1/log/entries?service_public_key={prefix}{raw}"));
+    }
+    for path in paths {
+        let (status, _, body) = served.get(&path).await;
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::OK,
+            "{path}: {status}"
+        );
+        assert!(body["latest"].is_null(), "{path}: an entry came back");
+        assert!(
+            body["entries"].as_array().is_none_or(|e| e.is_empty()),
+            "{path}: entries came back"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs ORBYN_KEYSERVICE_DATABASE_URL"]
+async fn a_neighbours_map_key_from_an_absence_proof_opens_no_entries() {
+    // Reviewer 26's finding as a regression: a lookup of a key that is not there ends at the
+    // neighbouring leaf, which carries the neighbour's full map key. That key must open nothing.
+    let (c, public_key) = published_log().await;
+    let served = Served::start(&c, config(&c, 2)).await;
+    let own = service_account_map_key(&public_key);
+    let neighbour = neighbour_of(&served, &[200u8; 33])
+        .await
+        .expect("an absence proof");
+    assert_eq!(neighbour, own, "the only account is the neighbour");
+    assert_a_map_key_opens_nothing(&served, &neighbour).await;
+    // The account itself is still reachable by its service public key.
+    let (_, _, body) = served
+        .get(&format!("/v1/log/lookup/{}", hex(&public_key)))
+        .await;
+    assert!(body["latest"].is_object());
+    c.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs ORBYN_KEYSERVICE_DATABASE_URL"]
+async fn walking_the_map_with_absence_proofs_finds_map_keys_and_no_entry_for_any_of_them() {
+    let c = Chain::new(3).await;
+    let accounts: Vec<[u8; 33]> = (1..=6u8).map(|n| [n; 33]).collect();
+    for key in &accounts {
+        append_chain(&c, key, 2).await;
+    }
+    c.publisher(2).publish_once().await.expect("cycle");
+    let mut cfg = config(&c, 2);
+    cfg.client_ip_header = public::header_name("cf-connecting-ip");
+    let mut served = Served::start(&c, cfg).await;
+    served.rotating = true;
+    // Look up many keys that are not there, and collect every neighbour the proofs show.
+    let wanted: std::collections::BTreeSet<[u8; 32]> =
+        accounts.iter().map(service_account_map_key).collect();
+    let mut found = std::collections::BTreeSet::new();
+    for i in 0..400u32 {
+        let mut probe = [0u8; 33];
+        probe[1..5].copy_from_slice(&i.to_be_bytes());
+        probe[0] = 2;
+        if let Some(neighbour) = neighbour_of(&served, &probe).await {
+            found.insert(neighbour);
+        }
+    }
+    assert_eq!(
+        found, wanted,
+        "the walk learns every map key in the map (what is accepted)"
+    );
+    // And learns nothing more: none of them opens an entry.
+    for map_key in &found {
+        assert_a_map_key_opens_nothing(&served, map_key).await;
+    }
+    c.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs ORBYN_KEYSERVICE_DATABASE_URL"]
+async fn a_request_that_times_out_still_carries_the_headers() {
+    let (c, _) = published_log().await;
+    let mut cfg = config(&c, 2);
+    cfg.request_timeout = Some(std::time::Duration::ZERO);
+    let served = Served::start(&c, cfg).await;
+    let (status, headers, body) = served
+        .get_with("/v1/log/head", &[("origin", "https://planner.example")])
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "unavailable");
+    assert_eq!(
+        headers["content-security-policy"],
+        "default-src 'none'; frame-ancestors 'none'"
+    );
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert!(headers["vary"].to_str().expect("vary").contains("Origin"));
+    assert_eq!(
+        headers["access-control-allow-origin"],
+        "https://planner.example"
+    );
+    c.finish().await;
 }

@@ -234,6 +234,8 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
         audit: Arc::new(TracingAudit),
         now_ms: Arc::new(system_now_ms),
     });
+    // Old allowance rows of addresses that never come back are removed, in this process too.
+    tokio::spawn(crate::prune_rate_events_forever(state.store.clone()));
     // The publisher runs beside the API, in this process.
     if let Some(settings) = publisher {
         let publisher = Publisher::new(
@@ -255,6 +257,7 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
                     allowed_origins: public_settings.allowed_origins.clone(),
                     client_ip_header: public_settings.client_ip_header.clone(),
                     keys: keys_info,
+                    request_timeout: None,
                 },
             ),
         )

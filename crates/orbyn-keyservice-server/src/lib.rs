@@ -497,6 +497,20 @@ impl Store {
         Ok(allowed)
     }
 
+    /// Removes every `rate_events` row older than `max_age_secs`: the rows of blocks and accounts
+    /// that never come back, which `allow` (which prunes only its own subject) leaves behind.
+    /// Returns how many went. `max_age_secs` must be at least the longest window any caller counts
+    /// over, or a limit would forget requests it should still count.
+    pub async fn prune_rate_events(&self, max_age_secs: u64) -> Result<u64> {
+        let age = i64::try_from(max_age_secs).map_err(|_| StoreError::BadEntry)?;
+        let done =
+            sqlx::query("DELETE FROM rate_events WHERE at < now() - make_interval(secs => $1)")
+                .bind(age as f64)
+                .execute(&self.pool)
+                .await?;
+        Ok(done.rows_affected())
+    }
+
     /// The newest **stored** head, which may not be published: it can be waiting for its
     /// cosignatures, or be a stale link of the chain that never will be. **Never serve it.** What
     /// is public is [`Store::latest_published_head`]; this is for the publisher's own bookkeeping

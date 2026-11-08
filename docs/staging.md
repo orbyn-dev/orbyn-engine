@@ -40,7 +40,7 @@ Make a tunnel named `orbyn-staging`, separate from orbyn.dev's, and copy its tok
 
 Both are the container ports, reached by name inside the staging compose network. orbyn.dev's tunnel is not touched.
 
-For the key service's public API (the `smoke` profile) add a third: `log-staging.orbyn.dev` -> `http://keyservice:8480`. It is the key service's public listener only; the internal mutual-TLS API (port 8443) has no route through the tunnel and no published port. Production uses `log.orbyn.dev` the same way.
+For the key service's public API (the `smoke` profile) add a third: `log-staging.orbyn.dev` -> `http://keyservice:8480`. It is the key service's public listener only; the internal mutual-TLS API (port 8443) has no route through the tunnel and no published port. The key service is on its own `ks` network (with its database) and on `ks-public`, which only `cloudflared` shares, and not on the default network: the record server and the planner cannot reach port 8480, so none of them can send it a forged `cf-connecting-ip`. Production uses `log.orbyn.dev` the same way.
 
 ## Settings
 

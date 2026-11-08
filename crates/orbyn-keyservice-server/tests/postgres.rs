@@ -2426,3 +2426,49 @@ async fn consistency_proofs_are_served_only_within_the_published_log() {
     }
     db.cleanup().await;
 }
+
+#[tokio::test]
+#[ignore = "needs ORBYN_KEYSERVICE_DATABASE_URL"]
+async fn pruning_removes_the_allowance_rows_nobody_will_count_again_and_only_those() {
+    let db = TestDb::new().await;
+    let store = db.store().await;
+    // Recent rows from several blocks that never come back, and old ones, as the owner can place.
+    for n in 0..20u8 {
+        assert!(
+            store
+                .allow("public_lookup", &[6, n], 60, 3600)
+                .await
+                .expect("allow")
+        );
+    }
+    run(
+        &db.owner,
+        "INSERT INTO rate_events (action, subject, at) \
+         SELECT 'public_lookup', decode('06' || lpad(to_hex(g), 2, '0'), 'hex'), now() - interval '3 hours' \
+         FROM generate_series(100, 129) g"
+            .to_owned(),
+    )
+    .await
+    .expect("old rows");
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM rate_events")
+        .fetch_one(&db.owner)
+        .await
+        .expect("count");
+    assert_eq!(total, 50);
+    // Two hours: the three-hour-old rows go, the recent ones stay.
+    assert_eq!(store.prune_rate_events(2 * 3600).await.expect("prune"), 30);
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM rate_events")
+        .fetch_one(&db.owner)
+        .await
+        .expect("count");
+    assert_eq!(total, 20);
+    // Nothing more to remove; the recent allowance still counts (a limit of 1 is spent).
+    assert_eq!(store.prune_rate_events(2 * 3600).await.expect("prune"), 0);
+    assert!(
+        !store
+            .allow("public_lookup", &[6, 3], 1, 3600)
+            .await
+            .expect("allow")
+    );
+    db.cleanup().await;
+}

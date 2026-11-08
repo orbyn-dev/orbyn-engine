@@ -25,7 +25,7 @@ use axum::routing::{MethodRouter, get};
 use axum::{Json, Router};
 use orbyn_keyservice_client::{hex, unhex};
 use orbyn_keyservice_server::{ChainEntry, PAGE, PublishedHead, Store, StoreError};
-use orbyn_translog::MapId;
+use orbyn_translog::{MapId, service_account_map_key};
 use serde_json::{Value, json};
 
 /// Which handler a route runs. [`router`] has one arm for each (a `match` with no wildcard).
@@ -98,7 +98,7 @@ pub const PUBLIC_ENDPOINTS: [PublicRoute; 5] = [
     PublicRoute {
         handler: PublicHandler::Lookup,
         method: "GET",
-        path: "/v1/log/lookup/{map_key}",
+        path: "/v1/log/lookup/{service_public_key}",
         allowance: Allowance::Lookup,
     },
     PublicRoute {
@@ -131,6 +131,8 @@ pub struct PublicConfig {
     /// tunnel); the last address in it is used. Without it the connection's own address is.
     pub client_ip_header: Option<HeaderName>,
     pub keys: KeysInfo,
+    /// How long a request may take before it is answered 503. `None`: 30 seconds.
+    pub request_timeout: Option<Duration>,
 }
 
 struct PublicState {
@@ -160,13 +162,19 @@ pub fn router(store: Store, config: PublicConfig) -> Router {
     }
     router
         .fallback(not_found)
+        // The timeout is inside the headers, so its 503 carries CSP, nosniff, Vary and CORS too.
+        .layer(middleware::from_fn_with_state(state.clone(), time_limit))
         .layer(middleware::from_fn_with_state(state.clone(), headers))
-        .layer(middleware::from_fn(time_limit))
         .with_state(state)
 }
 
-async fn time_limit(request: Request, next: Next) -> Response {
-    match tokio::time::timeout(REQUEST_TIMEOUT, next.run(request)).await {
+async fn time_limit(
+    AxumState(state): AxumState<Arc<PublicState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let limit = state.config.request_timeout.unwrap_or(REQUEST_TIMEOUT);
+    match tokio::time::timeout(limit, next.run(request)).await {
         Ok(response) => response,
         Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
     }
@@ -361,7 +369,9 @@ async fn consistency(
     if let Some(refused) = allow(&state, Allowance::Consistency, &headers, peer).await {
         return refused;
     }
-    let query = parse_query(&request);
+    let Some(query) = parse_query(&request) else {
+        return error(StatusCode::BAD_REQUEST, "bad_request");
+    };
     let number = |name: &str| query.get(name).and_then(|v| v.parse::<u64>().ok());
     let (Some(from), Some(to)) = (number("from"), number("to")) else {
         return error(StatusCode::BAD_REQUEST, "bad_request");
@@ -380,23 +390,33 @@ async fn consistency(
     }
 }
 
-/// The query string as pairs, read once. A query over [`MAX_QUERY`] bytes reads as empty (and so
-/// as a bad request).
-fn parse_query(request: &Request) -> std::collections::HashMap<String, String> {
-    if request.uri().query().is_none_or(|q| q.len() > MAX_QUERY) {
-        return Default::default();
+/// The query string as pairs, read once. A query over [`MAX_QUERY`] bytes, or one that does not
+/// read, is `None`: a bad request.
+fn parse_query(request: &Request) -> Option<std::collections::HashMap<String, String>> {
+    match request.uri().query() {
+        None => Some(Default::default()),
+        Some(q) if q.len() > MAX_QUERY => None,
+        Some(_) => Query::<std::collections::HashMap<String, String>>::try_from_uri(request.uri())
+            .ok()
+            .map(|q| q.0),
     }
-    Query::<std::collections::HashMap<String, String>>::try_from_uri(request.uri())
-        .map(|q| q.0)
-        .unwrap_or_default()
 }
 
+/// The map an answer is about. Only the service-key map is served: it is the one a client looks
+/// itself up in with its own service public key. The identity map has nothing to look up yet, so
+/// `identity` is a bad request until its content lands.
 fn parse_map(value: Option<&String>) -> Option<MapId> {
     match value.map(String::as_str) {
         None | Some("service") => Some(MapId::Service),
-        Some("identity") => Some(MapId::Identity),
         _ => None,
     }
+}
+
+/// The map key of the account whose service public key this is (66 hex digits: 33 bytes). **The
+/// service computes it; no route takes a map key**, so a map key learned from someone else's
+/// absence proof opens nothing.
+fn map_key_of(service_public_key: &str) -> Option<[u8; 32]> {
+    unhex::<33>(service_public_key).map(|public| service_account_map_key(&public))
 }
 
 async fn entries(
@@ -408,9 +428,11 @@ async fn entries(
     if let Some(refused) = allow(&state, Allowance::Lookup, &headers, peer).await {
         return refused;
     }
-    let query = parse_query(&request);
+    let Some(query) = parse_query(&request) else {
+        return error(StatusCode::BAD_REQUEST, "bad_request");
+    };
     let (Some(key), Some(map)) = (
-        query.get("map_key").and_then(|k| unhex::<32>(k)),
+        query.get("service_public_key").and_then(|k| map_key_of(k)),
         parse_map(query.get("map")),
     ) else {
         return error(StatusCode::BAD_REQUEST, "bad_request");
@@ -446,14 +468,17 @@ async fn lookup(
     AxumState(state): AxumState<Arc<PublicState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Path(map_key): Path<String>,
+    Path(service_public_key): Path<String>,
     request: Request,
 ) -> Response {
     if let Some(refused) = allow(&state, Allowance::Lookup, &headers, peer).await {
         return refused;
     }
-    let query = parse_query(&request);
-    let (Some(key), Some(map)) = (unhex::<32>(&map_key), parse_map(query.get("map"))) else {
+    let Some(query) = parse_query(&request) else {
+        return error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let (Some(key), Some(map)) = (map_key_of(&service_public_key), parse_map(query.get("map")))
+    else {
         return error(StatusCode::BAD_REQUEST, "bad_request");
     };
     match state.store.published_lookup(map, &key).await {
