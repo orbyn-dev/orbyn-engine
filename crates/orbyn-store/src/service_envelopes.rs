@@ -53,6 +53,11 @@ pub struct MissingServiceEnvelope {
     pub key_id: Vec<u8>,
 }
 
+/// A certification row: identity version, public key, statement, signature, statement hash.
+type CertificationRow = (i32, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+/// A service envelope row: sender, zone, key id, envelope, statement hash.
+type EnvelopeRow = (Uuid, String, Vec<u8>, Vec<u8>, Vec<u8>);
+
 fn hash_of(bytes: Vec<u8>) -> Result<[u8; 32]> {
     bytes.try_into().map_err(|_| StoreError::Internal)
 }
@@ -98,7 +103,7 @@ impl Store {
         &self,
         account_id: Uuid,
     ) -> Result<Option<ServiceCertification>> {
-        let row: Option<(i32, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        let row: Option<CertificationRow> = sqlx::query_as(
             "SELECT identity_version, public_key, statement, signature, statement_hash
              FROM account_service_keys WHERE account_id = $1",
         )
@@ -201,7 +206,7 @@ impl Store {
     /// them. Oldest first.
     pub async fn list_service_envelopes(&self, session: &Session) -> Result<Vec<ServiceEnvelope>> {
         require_trusted(&self.pool, session, false).await?;
-        let rows: Vec<(Uuid, String, Vec<u8>, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        let rows: Vec<EnvelopeRow> = sqlx::query_as(
             "SELECT sender_device_id, zone, key_id, envelope, service_statement_hash
              FROM key_envelopes WHERE account_id = $1 AND recipient_kind = 'service'
              ORDER BY created_at, zone, key_id",
