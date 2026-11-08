@@ -7,6 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# An in-memory log for tests of the verifier (here and in the client).
+test-support = []
+
 [dependencies]
 ed25519-dalek.workspace = true
 sha2.workspace = true

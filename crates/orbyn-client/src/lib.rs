@@ -27,12 +27,16 @@ pub mod crypt;
 mod pairing;
 mod planner;
 mod protection;
+mod service_key;
 mod trust;
 
 pub use crypt::KeyId;
 pub use pairing::{ApproverPairing, DevicePairing, ENDORSEMENT_CONTEXT, MAX_ENDORSED};
 pub use planner::{ITEM_TYPE, item_fields, item_from_fields};
 pub use protection::{ProtectionFloor, ProtectionHead, ProtectionState, ProtectionStatus};
+pub use service_key::{
+    LogAnswers, ServiceKeyPins, ServiceKeyRefusal, VerifiedServiceKey, verify_service_key,
+};
 pub use trust::{Peer, PinnedKeys, uuid_bytes};
 
 use base64::Engine as _;

@@ -20,6 +20,9 @@ pub mod entry;
 pub mod head;
 pub mod map;
 pub mod merkle;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+pub mod verify;
 
 pub use cosign::{Cosignature, cosign_message, cosigned_enough, threshold_ok};
 pub use entry::{
