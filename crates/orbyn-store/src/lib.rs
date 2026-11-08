@@ -28,6 +28,7 @@ mod live;
 mod protection;
 mod purge;
 mod records;
+mod service_envelopes;
 mod token;
 mod zones;
 
@@ -37,6 +38,10 @@ pub use protection::{NewProtection, PROTECTION_PAGE, ProtectionLevel, Protection
 #[cfg(feature = "test-support")]
 pub use purge::purge_accounts;
 pub use purge::{Purged, purge};
+pub use service_envelopes::{
+    MissingServiceEnvelope, NewServiceEnvelope, SERVICE_MISSING_PAGE, ServiceCertification,
+    ServiceEnvelope,
+};
 pub use token::ChangeToken;
 
 use chrono::{DateTime, Utc};
@@ -197,6 +202,15 @@ pub enum StoreError {
     RecipientNotTrusted,
     #[error("the device has too many key envelopes")]
     TooManyEnvelopes,
+    /// The envelope was sealed to a service key that is not the account's certified one.
+    #[error("the service key is not the account's current one")]
+    ServiceKeyChanged,
+    /// A service envelope was sent for an account whose newest stored setting is Advanced.
+    #[error("the account's protection is Advanced; nothing is copied to the service")]
+    ProtectionAdvanced,
+    /// A service envelope was sent before the server holds the account's service key.
+    #[error("the account has no service key yet")]
+    NoServiceKey,
     #[error("a protection setting is not valid")]
     InvalidProtection,
     /// The signature does not verify under the session device's key, or is not from the last

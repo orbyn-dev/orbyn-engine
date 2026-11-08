@@ -8,8 +8,9 @@ use orbyn_core::Database;
 use orbyn_core::accounts::{DeviceState, Limit, Session};
 use orbyn_crypto::DeviceKeys;
 use orbyn_store::{
-    Change, ChangeToken, Hub, KEY_ID_LEN, Limits, NewEnvelope, NewProtection, Notice,
-    ProtectionLevel, Rotation, Store, StoreError, Upload, ZONE_CHANGED_JOB,
+    Change, ChangeToken, Hub, KEY_ID_LEN, Limits, NewEnvelope, NewProtection, NewServiceEnvelope,
+    Notice, ProtectionLevel, Rotation, SERVICE_MISSING_PAGE, ServiceCertification, Store,
+    StoreError, Upload, ZONE_CHANGED_JOB,
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -2266,6 +2267,332 @@ fn hash_of(session: &Session, new: &NewProtection) -> [u8; 32] {
         &new.prev,
         new.signed_at,
     ))
+}
+
+fn certification(n: u8) -> ServiceCertification {
+    ServiceCertification {
+        identity_version: 1,
+        public_key: vec![n; 33],
+        statement: vec![n; 77],
+        signature: vec![n; 64],
+        statement_hash: [n; 32],
+    }
+}
+
+fn service_envelope(zone: &str, key: u8, bytes: &[u8], hash: u8) -> NewServiceEnvelope {
+    NewServiceEnvelope {
+        zone: zone.into(),
+        key_id: vec![key; KEY_ID_LEN],
+        envelope: bytes.to_vec(),
+        statement_hash: [hash; 32],
+    }
+}
+
+/// An account's newest stored setting, as the protection chain would leave it. The server does not
+/// check the signature here (devices do), only the level.
+async fn store_setting(db: &Database, session: &Session, seq: i64, level: &str) {
+    sqlx::query(
+        "INSERT INTO protection_settings
+             (account_id, seq, level, prev, hash, signed_at, signer_device_id, signature)
+         VALUES ($1, $2, $3, decode(lpad(to_hex($2::bigint - 1), 64, '0'), 'hex'),
+                 decode(lpad(to_hex($2::bigint), 64, '0'), 'hex'), 1, $4,
+                 decode(repeat('22', 64), 'hex'))",
+    )
+    .bind(session.account_id)
+    .bind(seq)
+    .bind(level)
+    .bind(session.device_id)
+    .execute(db.pool())
+    .await
+    .expect("setting");
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn service_envelopes_sit_beside_device_envelopes_and_a_retry_replaces_one() {
+    let (store, db) = store().await;
+    let laptop = trusted(&db).await;
+    let phone = device(&db, laptop.account_id, "trusted").await;
+    store
+        .put_envelopes(
+            &laptop,
+            &[
+                envelope(&phone, "inbox", 1, b"device one"),
+                envelope(&phone, "work", 2, b"device two"),
+            ],
+        )
+        .await
+        .expect("device envelopes");
+    store
+        .put_service_certification(laptop.account_id, &certification(5))
+        .await
+        .expect("certification");
+    assert_eq!(
+        store
+            .service_certification(laptop.account_id)
+            .await
+            .expect("read"),
+        Some(certification(5))
+    );
+
+    // Nothing is held for the service yet: both zone keys are missing, in order.
+    let missing = store.service_missing(&laptop).await.expect("missing");
+    let names: Vec<_> = missing.iter().map(|m| m.zone.as_str()).collect();
+    assert_eq!(names, ["inbox", "work"]);
+
+    store
+        .put_service_envelopes(&laptop, &[service_envelope("inbox", 1, b"service one", 5)])
+        .await
+        .expect("service");
+    let held = store.list_service_envelopes(&laptop).await.expect("held");
+    assert_eq!(held.len(), 1);
+    assert_eq!(
+        (
+            held[0].zone.as_str(),
+            held[0].envelope.as_slice(),
+            held[0].sender_device_id
+        ),
+        ("inbox", &b"service one"[..], laptop.device_id)
+    );
+    assert_eq!(held[0].statement_hash, [5; 32]);
+    let missing = store.service_missing(&laptop).await.expect("missing");
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].zone, "work");
+
+    // A retry replaces it: still one, with the new bytes and sender.
+    store
+        .put_service_envelopes(&phone, &[service_envelope("inbox", 1, b"again", 5)])
+        .await
+        .expect("retry");
+    let held = store.list_service_envelopes(&laptop).await.expect("held");
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].envelope, b"again");
+    assert_eq!(held[0].sender_device_id, phone.device_id);
+
+    // The device envelopes are untouched, and a device never lists the service's.
+    let for_phone = store.list_envelopes(&phone).await.expect("list");
+    assert_eq!(for_phone.len(), 2);
+    assert!(for_phone.iter().all(|e| e.envelope.starts_with(b"device")));
+    assert!(
+        store
+            .list_envelopes(&laptop)
+            .await
+            .expect("list")
+            .is_empty()
+    );
+    // A device envelope and a service envelope for one key do not collide.
+    store
+        .put_envelopes(&laptop, &[envelope(&phone, "inbox", 1, b"device again")])
+        .await
+        .expect("replace the device one");
+    assert_eq!(
+        store
+            .list_service_envelopes(&laptop)
+            .await
+            .expect("held")
+            .len(),
+        1
+    );
+    db.pool().close().await;
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_service_envelope_is_refused_without_a_key_for_another_key_and_under_advanced() {
+    let (store, db) = store().await;
+    let laptop = trusted(&db).await;
+    let pending = device(&db, laptop.account_id, "pending").await;
+    let stranger = trusted(&db).await;
+    let one = [service_envelope("inbox", 1, b"x", 5)];
+
+    // Before the server holds a certification there is nothing to seal to.
+    assert!(matches!(
+        store.put_service_envelopes(&laptop, &one).await,
+        Err(StoreError::NoServiceKey)
+    ));
+    store
+        .put_service_certification(laptop.account_id, &certification(5))
+        .await
+        .expect("certification");
+    // Sealed to another key: the whole batch is refused and nothing is written.
+    let mixed = [
+        service_envelope("inbox", 1, b"x", 5),
+        service_envelope("work", 2, b"y", 6),
+    ];
+    assert!(matches!(
+        store.put_service_envelopes(&laptop, &mixed).await,
+        Err(StoreError::ServiceKeyChanged)
+    ));
+    assert!(
+        store
+            .list_service_envelopes(&laptop)
+            .await
+            .expect("held")
+            .is_empty()
+    );
+    // A device that is not trusted cannot send one, nor read the list or the missing keys.
+    assert!(matches!(
+        store.put_service_envelopes(&pending, &one).await,
+        Err(StoreError::DeviceNotTrusted)
+    ));
+    assert!(matches!(
+        store.service_missing(&pending).await,
+        Err(StoreError::DeviceNotTrusted)
+    ));
+    // Malformed ones: a short key id, an empty or oversized envelope, a repeated key, none at all.
+    let bad_key = NewServiceEnvelope {
+        key_id: vec![1; 3],
+        ..service_envelope("inbox", 1, b"x", 5)
+    };
+    let empty = service_envelope("inbox", 1, b"", 5);
+    let huge = service_envelope("inbox", 1, &vec![0u8; 1025], 5);
+    let repeated = [
+        service_envelope("inbox", 1, b"x", 5),
+        service_envelope("inbox", 1, b"y", 5),
+    ];
+    for bad in [&[bad_key][..], &[empty], &[huge], &repeated] {
+        assert!(matches!(
+            store.put_service_envelopes(&laptop, bad).await,
+            Err(StoreError::InvalidEnvelope)
+        ));
+    }
+    assert!(matches!(
+        store.put_service_envelopes(&laptop, &[]).await,
+        Err(StoreError::BatchTooLarge)
+    ));
+    // Another account's certification is its own: the stranger has none, and cannot borrow ours.
+    assert!(matches!(
+        store.put_service_envelopes(&stranger, &one).await,
+        Err(StoreError::NoServiceKey)
+    ));
+    // The same envelope is fine once nothing is wrong, and refused again under Advanced.
+    store
+        .put_service_envelopes(&laptop, &one)
+        .await
+        .expect("fine");
+    store_setting(&db, &laptop, 1, "standard").await;
+    store
+        .put_service_envelopes(&laptop, &one)
+        .await
+        .expect("standard is fine");
+    store_setting(&db, &laptop, 2, "advanced").await;
+    assert!(matches!(
+        store
+            .put_service_envelopes(&laptop, &[service_envelope("work", 2, b"y", 5)])
+            .await,
+        Err(StoreError::ProtectionAdvanced)
+    ));
+    assert_eq!(
+        store
+            .list_service_envelopes(&laptop)
+            .await
+            .expect("held")
+            .len(),
+        1
+    );
+    // Under Advanced nothing is asked to be copied.
+    let phone = device(&db, laptop.account_id, "trusted").await;
+    store
+        .put_envelopes(&laptop, &[envelope(&phone, "work", 2, b"d")])
+        .await
+        .expect("device envelope");
+    assert!(
+        store
+            .service_missing(&laptop)
+            .await
+            .expect("missing")
+            .is_empty()
+    );
+    db.pool().close().await;
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_service_recipient_has_its_own_cap_and_missing_keys_come_a_hundred_at_a_time() {
+    let (store, db) = store_with(Limits {
+        max_envelopes_per_device: 3,
+        max_envelope_batch: 200,
+        ..Limits::default()
+    })
+    .await;
+    let laptop = trusted(&db).await;
+    let phone = device(&db, laptop.account_id, "trusted").await;
+    store
+        .put_service_certification(laptop.account_id, &certification(5))
+        .await
+        .expect("certification");
+    // Three device envelopes fill a device's cap, and the service still takes three of its own.
+    store
+        .put_envelopes(
+            &laptop,
+            &[
+                envelope(&phone, "a", 1, b"1"),
+                envelope(&phone, "a", 2, b"2"),
+                envelope(&phone, "a", 3, b"3"),
+            ],
+        )
+        .await
+        .expect("a device's three");
+    store
+        .put_service_envelopes(
+            &laptop,
+            &[
+                service_envelope("a", 1, b"1", 5),
+                service_envelope("a", 2, b"2", 5),
+                service_envelope("a", 3, b"3", 5),
+            ],
+        )
+        .await
+        .expect("the service's three");
+    assert!(matches!(
+        store
+            .put_service_envelopes(&laptop, &[service_envelope("a", 4, b"4", 5)])
+            .await,
+        Err(StoreError::TooManyEnvelopes)
+    ));
+    assert_eq!(
+        store
+            .list_service_envelopes(&laptop)
+            .await
+            .expect("held")
+            .len(),
+        3
+    );
+    db.pool().close().await;
+
+    // A page is a hundred: 130 keys held by a device, none by the service.
+    let (store, db) = store_with(Limits {
+        max_envelopes_per_device: 1000,
+        max_envelope_batch: 200,
+        ..Limits::default()
+    })
+    .await;
+    let laptop = trusted(&db).await;
+    let phone = device(&db, laptop.account_id, "trusted").await;
+    let many: Vec<_> = (0..130u8).map(|k| envelope(&phone, "z", k, b"d")).collect();
+    store.put_envelopes(&laptop, &many).await.expect("130");
+    let first = store.service_missing(&laptop).await.expect("page");
+    assert_eq!(first.len(), SERVICE_MISSING_PAGE);
+    store
+        .put_service_certification(laptop.account_id, &certification(5))
+        .await
+        .expect("certification");
+    let sent: Vec<_> = first
+        .iter()
+        .map(|m| NewServiceEnvelope {
+            zone: m.zone.clone(),
+            key_id: m.key_id.clone(),
+            envelope: b"s".to_vec(),
+            statement_hash: [5; 32],
+        })
+        .collect();
+    store
+        .put_service_envelopes(&laptop, &sent)
+        .await
+        .expect("a hundred");
+    let rest = store.service_missing(&laptop).await.expect("rest");
+    assert_eq!(rest.len(), 30, "the next page is what is still missing");
+    db.pool().close().await;
 }
 
 #[tokio::test]
