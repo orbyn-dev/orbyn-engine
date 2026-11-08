@@ -525,8 +525,7 @@ pub struct PublicSettings {
 }
 
 impl PublicSettings {
-    /// An error is the operator message, already formatted (TODO-design: the three messages are
-    /// plain text in the internal bind's shape, not yet drawn).
+    /// An error is the designed operator message, already formatted.
     pub fn parse(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let get = |name: &str| lookup(name).filter(|v| !v.trim().is_empty());
         let bind = match get("ORBYN_KS_PUBLIC_BIND") {
