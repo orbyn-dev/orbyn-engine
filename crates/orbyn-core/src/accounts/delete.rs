@@ -412,6 +412,10 @@ impl Accounts {
             .bind(email)
             .execute(&mut **tx)
             .await?;
+        sqlx::query("DELETE FROM signup_codes WHERE email = $1")
+            .bind(email)
+            .execute(&mut **tx)
+            .await?;
 
         // The rate-limit rows keyed by this account's own subjects (digests, not the values).
         let email_login = self.secrets.digest("login-email", email.as_bytes());
@@ -424,15 +428,6 @@ impl Accounts {
             ),
             ("login-email", email_login),
             ("login-email-trusted", email_login),
-            (
-                "signup-codes-hour",
-                self.address_digest("signup-address", email),
-            ),
-            (
-                "signup-codes-day",
-                self.address_digest("signup-address", email),
-            ),
-            ("signup-notice", self.address_digest("signup-notice", email)),
             (
                 "delete-unused-address",
                 self.address_digest("delete-unused-address", email),

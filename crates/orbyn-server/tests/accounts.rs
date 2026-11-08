@@ -96,6 +96,28 @@ async fn build_server_mode(
     trace: Option<Trace>,
     signup: orbyn_core::SignupMode,
 ) -> Server {
+    build_server_policy(limits, pinned, trace, signup, test_policy()).await
+}
+
+/// A server under a sign-up pacing of the test's choosing.
+async fn server_policy(limits: Limits, policy: orbyn_core::accounts::SignupPolicy) -> Server {
+    build_server_policy(limits, false, None, orbyn_core::SignupMode::Open, policy).await
+}
+
+async fn build_server_policy(
+    limits: Limits,
+    pinned: bool,
+    trace: Option<Trace>,
+    signup: orbyn_core::SignupMode,
+    policy: orbyn_core::accounts::SignupPolicy,
+) -> Server {
+    // The start throttle is its own test's business: a test that did not set it signs up as often
+    // as it likes from its one address.
+    let mut limits = limits;
+    if limits.signup_start_free_per_prefix == Limits::default().signup_start_free_per_prefix {
+        limits.signup_start_free_per_prefix = Limit::new(100_000, Duration::from_secs(3600));
+        limits.signup_start_max_per_prefix = Limit::new(100_000, Duration::from_secs(3600));
+    }
     PIN.store(0, Ordering::SeqCst);
     if pinned {
         let step = totp::STEP_SECS;
@@ -109,6 +131,7 @@ async fn build_server_mode(
     let mut accounts = Accounts::new(db.pool().clone(), secrets)
         .with_limits(limits)
         .with_account_url(ACCOUNT_URL)
+        .with_signup_policy(policy)
         .with_signup(signup);
     if pinned {
         let at = PIN.load(Ordering::SeqCst);
@@ -247,21 +270,39 @@ impl Server {
         upload: &[u8],
         keys: &DeviceKeys,
     ) -> (StatusCode, Value) {
+        self.register_finish_from(self.ip, email, upload, keys, None)
+            .await
+    }
+
+    /// The same from a given client address, with a proof of work if there is one.
+    async fn register_finish_from(
+        &self,
+        ip: IpAddr,
+        email: &str,
+        upload: &[u8],
+        keys: &DeviceKeys,
+        proof: Option<Value>,
+    ) -> (StatusCode, Value) {
         let normalized = auth::normalize_email(email).expect("email");
         let signature = keys.sign(
             auth::DEVICE_REGISTER_CONTEXT,
             &auth::register_message(&normalized, upload, &keys.public()),
         );
-        self.call(
+        let mut body = json!({
+            "email": email,
+            "registration_upload": b64(upload),
+            "device": device_json("Laptop", &keys.public()),
+            "device_signature": b64(&signature),
+        });
+        if let Some(proof) = proof {
+            body["proof"] = proof;
+        }
+        self.call_from(
+            ip,
             Method::POST,
             "/v1/accounts/register/finish",
             None,
-            Some(json!({
-                "email": email,
-                "registration_upload": b64(upload),
-                "device": device_json("Laptop", &keys.public()),
-                "device_signature": b64(&signature),
-            })),
+            Some(body),
         )
         .await
     }
@@ -2959,10 +3000,10 @@ fn normalized(email: &str) -> String {
 
 /// A code that is not the one sent.
 fn other_than(code: &str) -> String {
-    if code == "000000" {
-        "000001".into()
+    if code == "22222222" {
+        "33333333".into()
     } else {
-        "000000".into()
+        "22222222".into()
     }
 }
 
@@ -3010,13 +3051,26 @@ async fn accounts_with(server: &Server, email: &str) -> i64 {
 fn generous() -> Limits {
     Limits {
         register_per_ip: Limit::new(10_000, Duration::from_secs(3600)),
-        signup_codes_per_hour: Limit::new(10_000, Duration::from_secs(3600)),
-        signup_codes_per_day: Limit::new(10_000, Duration::from_secs(86_400)),
+        signup_start_free_per_prefix: Limit::new(10_000, Duration::from_secs(3600)),
+        signup_start_max_per_prefix: Limit::new(10_000, Duration::from_secs(3600)),
         email_resend_per_signup: Limit::new(10_000, Duration::from_secs(3600)),
         email_code_guess_per_prefix: Limit::new(10_000, Duration::from_secs(1800)),
-        email_code_guess_per_code: Limit::new(10_000, Duration::from_secs(1800)),
         email_verify_fail_per_ip: Limit::new(10_000, Duration::from_secs(3600)),
         ..Limits::default()
+    }
+}
+
+/// The sign-up pacing the tests run under: every start and resend mails at once (the code is the
+/// same one), no response floor, and a proof of work that is quick to solve. A test that checks the
+/// pacing sets its own.
+fn test_policy() -> orbyn_core::accounts::SignupPolicy {
+    orbyn_core::accounts::SignupPolicy {
+        mail_pace: Duration::ZERO,
+        response_floor: Duration::ZERO,
+        pow_bits: 8,
+        // The ceiling on replacing spent codes is its own tests' business.
+        spent_free: 1_000_000,
+        spent_gap: Duration::ZERO,
     }
 }
 
@@ -3093,10 +3147,7 @@ async fn sign_up_makes_no_account_and_no_session_until_the_code_is_verified() {
     assert_eq!(accounts_with(&server, &email).await, 0);
     assert_eq!(real_rows(&server, &email).await, 1);
     let code = server.code_for(&email).await;
-    assert!(
-        code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()),
-        "{code}"
-    );
+    assert!(orbyn_core::email_code::is_code(&code), "{code}");
     // The queued message holds neither the code nor the address in the clear.
     let signup = pending["signup_id"].as_str().expect("id");
     let queued: Vec<String> = orbyn_core::sqlx::query_scalar(
@@ -3112,13 +3163,14 @@ async fn sign_up_makes_no_account_and_no_session_until_the_code_is_verified() {
         "{}",
         queued[0]
     );
-    let digest: Vec<u8> =
-        orbyn_core::sqlx::query_scalar("SELECT code_digest FROM pending_signups WHERE id = $1")
-            .bind(uuid_of(&pending["signup_id"]))
+    // The code is stored nowhere: the address's record holds a random salt it is derived from.
+    let salt_len: i32 =
+        orbyn_core::sqlx::query_scalar("SELECT length(salt) FROM signup_codes WHERE email = $1")
+            .bind(&norm)
             .fetch_one(server.db.pool())
             .await
-            .expect("digest");
-    assert_eq!(digest.len(), 32);
+            .expect("record");
+    assert_eq!(salt_len, 16);
 
     // The right code makes the account, trusts the device that signed up, and signs it in.
     let (status, session) = server.verify(&pending["signup_id"], &code).await;
@@ -3243,30 +3295,30 @@ async fn a_sign_up_lives_thirty_minutes_from_its_start_and_a_resend_does_not_ext
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
-async fn a_new_code_replaces_the_old_and_can_be_asked_for_three_times_an_hour() {
+async fn a_resend_sends_the_same_code_again_and_can_be_asked_for_three_times_an_hour() {
     let _turn = TURN.lock().await;
     let server = server().await;
     let email = email();
+    let norm = normalized(&email);
     let (id, first) = start_with_code(&server, &email).await;
-    let mut latest = first.clone();
     for n in 1..=3 {
         assert_eq!(
             server.resend(&id).await.0,
             StatusCode::NO_CONTENT,
             "resend {n}"
         );
-        latest = server.code_for(&email).await;
+        // Asking again mails the code that is active, not a new one, so an earlier mail still
+        // opens the sign-up and nobody can make a code stop working by asking.
+        assert_eq!(server.code_for(&email).await, first, "resend {n}");
     }
+    assert_eq!(server.mailbox().await.count(&norm, Kind::VerifyEmail), 4);
     let (status, body) = server.resend(&id).await;
     assert_eq!(
         (status, &body["code"]),
         (StatusCode::TOO_MANY_REQUESTS, &json!("too_many_attempts"))
     );
-    // The old code is gone (unless the dice gave the same one again), the newest works.
-    if latest != first {
-        assert_eq!(server.verify(&id, &first).await.0, StatusCode::BAD_REQUEST);
-    }
-    assert_eq!(server.verify(&id, &latest).await.0, StatusCode::CREATED);
+    assert_eq!(server.mailbox().await.count(&norm, Kind::VerifyEmail), 4);
+    assert_eq!(server.verify(&id, &first).await.0, StatusCode::CREATED);
 }
 
 #[tokio::test]
@@ -3311,7 +3363,7 @@ async fn a_taken_address_gets_an_answer_of_the_same_shape_and_its_owner_a_messag
         ),
         (1, 0)
     );
-    for code in ["000000", "123456", "999999"] {
+    for code in ["22222222", "K7QM-R4TW", "zzzzzzzz"] {
         assert_eq!(
             server.verify(&taken["signup_id"], code).await,
             refused(),
@@ -3319,21 +3371,27 @@ async fn a_taken_address_gets_an_answer_of_the_same_shape_and_its_owner_a_messag
         );
     }
     assert_eq!(accounts_with(&server, &email).await, 1);
-    // Asking for a code again sends nothing and answers like any resend.
-    let sent_before = server.mailbox().await.count(&norm, Kind::VerifyEmail);
+    // Asking for a code again answers like any resend and mails the owner the notice again, never
+    // a code, so a taken address is told but cannot be signed up.
+    let codes_before = server.mailbox().await.count(&norm, Kind::VerifyEmail);
+    let notices_before = server.mailbox().await.count(&norm, Kind::SignUpAttempt);
     assert_eq!(
         server.resend(&taken["signup_id"]).await.0,
         StatusCode::NO_CONTENT
     );
     assert_eq!(
         server.mailbox().await.count(&norm, Kind::VerifyEmail),
-        sent_before
+        codes_before
+    );
+    assert_eq!(
+        server.mailbox().await.count(&norm, Kind::SignUpAttempt),
+        notices_before + 1
     );
     // An id that is not even a UUID, or that nobody made, is refused the same way.
-    assert_eq!(server.verify(&json!("nope"), "123456").await, refused());
+    assert_eq!(server.verify(&json!("nope"), "22222222").await, refused());
     assert_eq!(
         server
-            .verify(&json!(Uuid::new_v4().to_string()), "123456")
+            .verify(&json!(Uuid::new_v4().to_string()), "22222222")
             .await,
         refused()
     );
@@ -3346,7 +3404,7 @@ async fn a_taken_address_gets_an_answer_of_the_same_shape_and_its_owner_a_messag
         owner["account_id"]
     );
     let mailbox = server.mailbox().await;
-    assert_eq!(mailbox.count(&norm, Kind::SignUpAttempt), 1);
+    assert_eq!(mailbox.count(&norm, Kind::SignUpAttempt), 2);
     // It says when and where to sign in, and carries no code and nothing about who tried.
     for m in mailbox
         .sent()
@@ -3411,27 +3469,47 @@ async fn the_code_is_shared_but_an_account_is_made_only_for_the_sign_up_named() 
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
-async fn someone_starting_sign_ups_for_an_address_only_puts_usable_codes_in_its_owners_inbox() {
+async fn someone_starting_sign_ups_for_an_address_only_mails_its_owner_the_code_that_works() {
     let _turn = TURN.lock().await;
-    // Two code mails an hour: the attacker spends both before the owner starts.
-    let server = server_with(Limits {
-        register_per_ip: Limit::new(10_000, Duration::from_secs(3600)),
-        signup_codes_per_hour: Limit::new(2, Duration::from_secs(3600)),
-        ..Limits::default()
-    })
-    .await;
+    let server = server_with(generous()).await;
     let email = email();
     let norm = normalized(&email);
-    let _first = start_as(&server, &email, "attacker one").await;
-    let _second = start_as(&server, &email, "attacker two").await;
-    assert_eq!(server.mailbox().await.count(&norm, Kind::VerifyEmail), 2);
-    // The owner starts their own: no mail is made (the caps are used up), but it is a real
-    // sign-up, and the newest code in their inbox, which the attacker's start caused, opens it.
-    let owner = start_as(&server, &email, "owner password").await;
-    assert_eq!(server.mailbox().await.count(&norm, Kind::VerifyEmail), 2);
-    assert_eq!(real_rows(&server, &email).await, 3);
-    let newest = server.code_for(&email).await;
-    let (status, session) = server.verify(&owner, &newest).await;
+    let upload = server.registration_upload(&email, b"attacker").await;
+    // An attacker starts five sign-ups for the address from five prefixes, each with a password
+    // of their own. Each only mails the owner the code that is active; none makes another.
+    for host in 1..=5 {
+        let (status, _) = server
+            .register_finish_from(
+                ip_in(50, host),
+                &email,
+                &upload,
+                &DeviceKeys::generate().expect("keys"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let code = server.code_for(&email).await;
+    assert_eq!(
+        server.mailbox().await.count(&norm, Kind::VerifyEmail),
+        5,
+        "bounded by the starts, which are bounded by the prefix limits"
+    );
+    // The owner starts their own from their own prefix and is mailed the same code, which opens
+    // theirs, whatever the attacker did before.
+    let owner_upload = server.registration_upload(&email, b"owner password").await;
+    let (status, owner) = server
+        .register_finish_from(
+            ip_in(60, 1),
+            &email,
+            &owner_upload,
+            &DeviceKeys::generate().expect("keys"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(server.code_for(&email).await, code, "one active code");
+    let (status, session) = server.verify(&owner["signup_id"], &code).await;
     assert_eq!(status, StatusCode::CREATED, "{session}");
     assert_eq!(
         server
@@ -3447,37 +3525,68 @@ async fn someone_starting_sign_ups_for_an_address_only_puts_usable_codes_in_its_
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
-async fn an_address_has_five_real_sign_ups_five_decoys_and_nothing_beyond() {
+async fn rows_are_capped_per_prefix_and_per_address_and_a_newer_start_evicts_the_oldest() {
     let _turn = TURN.lock().await;
     let server = server_with(generous()).await;
     let email = email();
+    let upload = server.registration_upload(&email, b"pw").await;
+    let start = |ip: IpAddr| {
+        let (server, email, upload) = (&server, &email, &upload);
+        async move {
+            server
+                .register_finish_from(
+                    ip,
+                    email,
+                    upload,
+                    &DeviceKeys::generate().expect("keys"),
+                    None,
+                )
+                .await
+        }
+    };
+    // One prefix holds two rows for an address: the newest two stay, and every start succeeds.
     let mut ids = Vec::new();
-    for _ in 0..12 {
-        ids.push(start_as(&server, &email, "pw").await);
+    for host in 1..=6 {
+        let (status, body) = start(ip_in(70, host)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        ids.push(body["signup_id"].clone());
     }
-    assert_eq!(
-        (
-            real_rows(&server, &email).await,
-            rows(&server, &email).await
-        ),
-        (5, 10)
-    );
-    // The first ten are stored (five real, five decoy), the last two belong to nobody.
-    let mut stored = Vec::new();
-    for id in &ids {
-        stored.push(
+    assert_eq!(rows(&server, &email).await, 2);
+    let alive = |id: &Value| {
+        let id = id.as_str().expect("id").to_owned();
+        let server = &server;
+        async move {
             count(
-                &server,
+                server,
                 "SELECT count(*) FROM pending_signups WHERE id::text = $1",
-                id.as_str().expect("id"),
+                &id,
             )
             .await
-                == 1,
-        );
+                == 1
+        }
+    };
+    assert!(!alive(&ids[3]).await && alive(&ids[4]).await && alive(&ids[5]).await);
+    // The address holds twenty in all, whichever prefixes they came from, and the oldest go first;
+    // a row younger than a quarter of an hour is never evicted by the address's cap, so for that
+    // long the address can hold more (another test), and the cap is applied once rows have aged.
+    let (_, owner) = start(ip_in(80, 1)).await;
+    for prefix in 81..=90u8 {
+        for host in 1..=2 {
+            assert_eq!(start(ip_in(prefix, host)).await.0, StatusCode::CREATED);
+        }
     }
-    assert_eq!(stored.iter().filter(|s| **s).count(), 10);
-    assert_eq!(&stored[10..], &[false, false]);
-    // An expired row does not count: a start after the thirty minutes is a real one again.
+    orbyn_core::sqlx::query(
+        "UPDATE pending_signups SET created_at = created_at - interval '20 minutes' WHERE email = $1",
+    )
+    .bind(normalized(&email))
+    .execute(server.db.pool())
+    .await
+    .expect("age");
+    start(ip_in(91, 1)).await;
+    assert_eq!(rows(&server, &email).await, 20);
+    assert!(!alive(&owner["signup_id"]).await, "the oldest went");
+    // Rows are never decoys here (the address is free), and an expired row does not count.
+    assert_eq!(real_rows(&server, &email).await, 20);
     orbyn_core::sqlx::query(
         "UPDATE pending_signups SET expires_at = now() - interval '1 second' WHERE email = $1",
     )
@@ -3485,19 +3594,13 @@ async fn an_address_has_five_real_sign_ups_five_decoys_and_nothing_beyond() {
     .execute(server.db.pool())
     .await
     .expect("expire");
-    start_as(&server, &email, "pw").await;
-    assert_eq!(
-        (
-            real_rows(&server, &email).await,
-            rows(&server, &email).await
-        ),
-        (1, 1)
-    );
+    start(ip_in(99, 1)).await;
+    assert_eq!(rows(&server, &email).await, 1);
 }
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
-async fn sign_ups_racing_for_one_address_leave_at_most_five_real_and_verifications_racing_leave_one_account()
+async fn sign_ups_racing_for_one_address_leave_at_most_two_rows_from_a_prefix_and_verifications_racing_leave_one_account()
  {
     let _turn = TURN.lock().await;
     let server = server_with(generous()).await;
@@ -3537,14 +3640,9 @@ async fn sign_ups_racing_for_one_address_leave_at_most_five_real_and_verificatio
     ];
     assert!(all.iter().all(|a| a.0 == StatusCode::CREATED));
     assert_eq!(
-        real_rows(&server, &email).await,
-        5,
-        "never more than five real"
-    );
-    assert_eq!(
         rows(&server, &email).await,
-        10,
-        "never more than ten in all"
+        2,
+        "never more than two rows from one prefix, however they race"
     );
 
     // Two real sign-ups verify at the same moment with the one code: one account, one winner.
@@ -3591,17 +3689,17 @@ async fn a_start_waits_for_the_address_lock_and_then_counts_what_was_added_meanw
         .expect("lock");
     let add = async {
         tokio::time::sleep(Duration::from_millis(400)).await;
-        for _ in 0..5 {
+        for _ in 0..20 {
             orbyn_core::sqlx::query(
                 "INSERT INTO pending_signups
                      (id, email, decoy, password_file, device_name, device_platform,
-                      device_signing_key, device_agreement_key, code_digest, expires_at)
-                 VALUES ($1, $2, false, decode('00', 'hex'), 'Laptop', 'web', $3, $3, $4, now() + interval '30 minutes')",
+                      device_signing_key, device_agreement_key, expires_at, created_at)
+                 VALUES ($1, $2, false, decode('00', 'hex'), 'Laptop', 'web', $3, $3,
+                         now() + interval '30 minutes', now() - interval '1 hour')",
             )
             .bind(Uuid::new_v4())
             .bind(&norm)
             .bind([1u8; 32].as_slice())
-            .bind([2u8; 32].as_slice())
             .execute(&mut *rival)
             .await
             .expect("row");
@@ -3611,16 +3709,33 @@ async fn a_start_waits_for_the_address_lock_and_then_counts_what_was_added_meanw
     let keys = DeviceKeys::generate().expect("keys");
     let ((status, _), ()) = tokio::join!(server.register_finish_with(&email, &upload, &keys), add);
     assert_eq!(status, StatusCode::CREATED);
-    // The start took the lock after the rival and saw its five: it is a decoy, not a sixth real.
-    assert_eq!(real_rows(&server, &email).await, 5);
-    assert_eq!(rows(&server, &email).await, 6);
+    // The start took the lock after the rival and saw its twenty: it evicted the oldest, so the
+    // address still holds twenty and the new row is one of them.
+    assert_eq!(rows(&server, &email).await, 20);
+    assert_eq!(
+        count(
+            &server,
+            "SELECT count(*) FROM pending_signups WHERE email = $1 AND prefix_digest IS NOT NULL",
+            &norm,
+        )
+        .await,
+        1
+    );
 }
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn sign_up_cannot_be_used_to_fill_an_inbox() {
     let _turn = TURN.lock().await;
-    let server = server().await;
+    // The default pace: one message about an address a minute, however it is asked for.
+    let server = server_policy(
+        generous(),
+        orbyn_core::accounts::SignupPolicy {
+            mail_pace: Duration::from_secs(60),
+            ..test_policy()
+        },
+    )
+    .await;
     let email = email();
     server
         .register(&email, b"pw", &DeviceKeys::generate().expect("keys"))
@@ -3635,14 +3750,21 @@ async fn sign_up_cannot_be_used_to_fill_an_inbox() {
             "every attempt is answered the same"
         );
     }
-    // Three an hour reach the owner; the answers did not change.
-    assert_eq!(
-        server
-            .mailbox()
-            .await
-            .count(&normalized(&email), Kind::SignUpAttempt),
-        3
-    );
+    // The first start after the account was made told the owner; the rest, inside the minute, did
+    // not. The pace is time, not a count: it is never used up and never locks anyone out.
+    let norm = normalized(&email);
+    assert_eq!(server.mailbox().await.count(&norm, Kind::SignUpAttempt), 1);
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET mailed_at = now() - interval '2 minutes' WHERE email = $1",
+    )
+    .bind(&norm)
+    .execute(server.db.pool())
+    .await
+    .expect("age");
+    server
+        .register_raw(&email, b"pw", &DeviceKeys::generate().expect("keys"))
+        .await;
+    assert_eq!(server.mailbox().await.count(&norm, Kind::SignUpAttempt), 2);
 }
 
 /// Runs `n` more sign-up starts for `email` and returns what each answered, as the requester sees
@@ -3670,10 +3792,13 @@ async fn finishes(
 #[ignore = "needs DATABASE_URL"]
 async fn a_new_a_taken_and_a_pending_address_answer_every_start_alike_and_only_the_mail_differs() {
     let _turn = TURN.lock().await;
-    let server = server_with(Limits {
-        register_per_ip: Limit::new(1000, Duration::from_secs(3600)),
-        ..Limits::default()
-    })
+    let server = server_policy(
+        generous(),
+        orbyn_core::accounts::SignupPolicy {
+            mail_pace: Duration::from_secs(60),
+            ..test_policy()
+        },
+    )
     .await;
     let fresh = email();
     let taken = email();
@@ -3688,8 +3813,8 @@ async fn a_new_a_taken_and_a_pending_address_answer_every_start_alike_and_only_t
         mail_counts(&server, &pending).await,
     ];
 
-    // Eleven starts each: the answers are the same at the 5th, the 6th and the 11th, and at every
-    // other one. Nothing a requester sees depends on the address or on the limits.
+    // Eleven starts each: the answers are the same at every one. Nothing a requester sees depends
+    // on the address or on the limits.
     let a = finishes(&server, &fresh, 11).await;
     let b = finishes(&server, &taken, 11).await;
     let c = finishes(&server, &pending, 11).await;
@@ -3704,72 +3829,107 @@ async fn a_new_a_taken_and_a_pending_address_answer_every_start_alike_and_only_t
         assert_eq!(a[n].0, StatusCode::CREATED);
         assert!(a[n].2, "a signup_id that is a UUID");
     }
-    // The stored rows follow the same rule: ten in all, whatever the address.
-    assert_eq!(rows(&server, &fresh).await, 10);
-    assert_eq!(rows(&server, &taken).await, 10);
-    assert_eq!(rows(&server, &pending).await, 10);
-    assert_eq!(real_rows(&server, &fresh).await, 5);
+    // The stored rows follow the same rule: two from this prefix, whatever the address, and a
+    // taken address's are decoys.
+    assert_eq!(rows(&server, &fresh).await, 2);
+    assert_eq!(rows(&server, &taken).await, 2);
+    assert_eq!(rows(&server, &pending).await, 2);
+    assert_eq!(real_rows(&server, &fresh).await, 2);
     assert_eq!(real_rows(&server, &taken).await, 0);
 
-    // The caps decided only the mail: five codes for the new address, five in all for the pending
-    // one (its first counts), three notices and no code for the taken one.
+    // Only the one message differs, and the pace decides when: one code for the new address, one
+    // notice and no code for the taken one, and nothing more for the pending one (its code went
+    // out a moment ago, and a start inside the minute mails nothing the owner does not hold).
     let after = [
         mail_counts(&server, &fresh).await,
         mail_counts(&server, &taken).await,
         mail_counts(&server, &pending).await,
     ];
-    assert_eq!((after[0].0 - before[0].0, after[0].1 - before[0].1), (5, 0));
-    assert_eq!((after[1].0 - before[1].0, after[1].1 - before[1].1), (0, 3));
-    assert_eq!(
-        after[2].0 - before[2].0,
-        4,
-        "5 an hour in all, the first already sent"
-    );
-    assert_eq!(after[2].1 - before[2].1, 0);
+    assert_eq!((after[0].0 - before[0].0, after[0].1 - before[0].1), (1, 0));
+    assert_eq!((after[1].0 - before[1].0, after[1].1 - before[1].1), (0, 1));
+    assert_eq!((after[2].0 - before[2].0, after[2].1 - before[2].1), (0, 0));
 }
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
-async fn only_a_mail_that_goes_out_counts_toward_the_caps_and_resends_draw_on_them() {
+async fn a_start_mails_the_active_code_again_only_after_the_pace_and_so_does_a_new_one() {
     let _turn = TURN.lock().await;
-    let server = server_with(Limits {
-        register_per_ip: Limit::new(1000, Duration::from_secs(3600)),
-        signup_codes_per_hour: Limit::new(1000, Duration::from_secs(3600)),
-        signup_codes_per_day: Limit::new(3, Duration::from_secs(86_400)),
-        email_resend_per_signup: Limit::new(1000, Duration::from_secs(3600)),
-        ..Limits::default()
-    })
+    let server = server_policy(
+        generous(),
+        orbyn_core::accounts::SignupPolicy {
+            mail_pace: Duration::from_secs(60),
+            ..test_policy()
+        },
+    )
     .await;
     let email = email();
     let norm = normalized(&email);
-    let (id, _) = start_with_code(&server, &email).await;
-    // Three code mails in the day: the start and two resends. The third resend and the next
-    // start are answered as always and send nothing, and a refused one counts nothing.
-    for _ in 0..2 {
-        assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+    let (id, code) = start_with_code(&server, &email).await;
+    async fn sent(server: &Server, norm: &str) -> usize {
+        server.mailbox().await.count(norm, Kind::VerifyEmail)
     }
-    assert_eq!(server.mailbox().await.count(&norm, Kind::VerifyEmail), 3);
-    for _ in 0..3 {
-        assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
-    }
-    let (status, second) = server
-        .register_raw(&email, b"pw", &DeviceKeys::generate().expect("keys"))
+    assert_eq!(sent(&server, &norm).await, 1);
+    // Inside the minute a start and a resend mail nothing: the owner holds the code.
+    let upload = server.registration_upload(&email, b"pw").await;
+    server
+        .register_finish_from(
+            ip_in(120, 1),
+            &email,
+            &upload,
+            &DeviceKeys::generate().expect("keys"),
+            None,
+        )
         .await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert!(Uuid::parse_str(second["signup_id"].as_str().expect("id")).is_ok());
-    assert_eq!(
-        server.mailbox().await.count(&norm, Kind::VerifyEmail),
-        3,
-        "the day's cap held"
-    );
-    // The second start is a real sign-up and takes the code that is active; it was not stored as
-    // nothing, because a refused mail changes nothing else.
-    assert_eq!(real_rows(&server, &email).await, 2);
-    let code = server.code_for(&email).await;
-    assert_eq!(
-        server.verify(&second["signup_id"], &code).await.0,
-        StatusCode::CREATED
-    );
+    assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(sent(&server, &norm).await, 1);
+    // A minute later any start mails the same code again, which never changed.
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET mailed_at = now() - interval '61 seconds' WHERE email = $1",
+    )
+    .bind(&norm)
+    .execute(server.db.pool())
+    .await
+    .expect("age");
+    let upload = server.registration_upload(&email, b"pw").await;
+    server
+        .register_finish_from(
+            ip_in(120, 1),
+            &email,
+            &upload,
+            &DeviceKeys::generate().expect("keys"),
+            None,
+        )
+        .await;
+    assert_eq!(sent(&server, &norm).await, 2);
+    assert_eq!(server.code_for(&email).await, code);
+    // A code that has died is replaced like any other make: not before the pace, which keeps the
+    // mail an address gets to one a minute, and then at once.
+    orbyn_core::sqlx::query("UPDATE signup_codes SET wrong_guesses = 10 WHERE email = $1")
+        .bind(&norm)
+        .execute(server.db.pool())
+        .await
+        .expect("kill");
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET mailed_at = now() - interval '10 seconds' WHERE email = $1",
+    )
+    .bind(&norm)
+    .execute(server.db.pool())
+    .await
+    .expect("recent");
+    assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(sent(&server, &norm).await, 2, "nothing inside the minute");
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET mailed_at = now() - interval '61 seconds' WHERE email = $1",
+    )
+    .bind(&norm)
+    .execute(server.db.pool())
+    .await
+    .expect("age");
+    assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(sent(&server, &norm).await, 3);
+    let fresh = server.code_for(&email).await;
+    assert_ne!(fresh, code);
+    assert_eq!(server.verify(&id, &fresh).await.0, StatusCode::CREATED);
 }
 
 #[tokio::test]
@@ -3778,7 +3938,6 @@ async fn every_verification_failure_looks_alike_for_any_id_even_when_a_limit_is_
     let _turn = TURN.lock().await;
     let server = server_with(Limits {
         email_code_guess_per_prefix: Limit::new(2, Duration::from_secs(1800)),
-        email_code_guess_per_code: Limit::new(4, Duration::from_secs(1800)),
         email_verify_fail_per_ip: Limit::new(8, Duration::from_secs(3600)),
         ..Limits::default()
     })
@@ -3818,7 +3977,7 @@ async fn every_verification_failure_looks_alike_for_any_id_even_when_a_limit_is_
     let (real2, code2) = start_with_code(&server, &other_email).await;
     let ip = ip_in(12, 1);
     for _ in 0..8 {
-        let answer = verify_from(&server, ip, &json!(Uuid::new_v4().to_string()), "000000").await;
+        let answer = verify_from(&server, ip, &json!(Uuid::new_v4().to_string()), "22222222").await;
         assert_eq!(answer, refused());
     }
     assert_eq!(verify_from(&server, ip, &real2, &code2).await, refused());
@@ -3868,11 +4027,12 @@ async fn a_code_is_bound_to_its_address() {
     let (a, code_a) = start_with_code(&server, &email()).await;
     let other = email();
     let (b, _) = start_with_code(&server, &other).await;
-    // The second address somehow holds the first one's stored digest: the first one's code still
-    // does not open it, because the digest names the address it is for.
+    // The second address somehow holds the first one's salt: the first one's code still does not
+    // open it, because the code is derived from the address as well.
     orbyn_core::sqlx::query(
-        "UPDATE pending_signups SET code_digest =
-             (SELECT code_digest FROM pending_signups WHERE id = $1) WHERE id = $2",
+        "UPDATE signup_codes SET salt = (SELECT salt FROM signup_codes WHERE email =
+             (SELECT email FROM pending_signups WHERE id = $1))
+         WHERE email = (SELECT email FROM pending_signups WHERE id = $2)",
     )
     .bind(uuid_of(&a))
     .bind(uuid_of(&b))
@@ -3969,6 +4129,860 @@ async fn verifying_a_real_sign_up_and_a_decoy_takes_about_the_same_time() {
         gap <= Duration::from_millis(1).max(r.max(d) / 3),
         "real {r:?} against decoy {d:?}"
     );
+}
+
+// ---- The sign-up throttle (engine#42) ----
+
+/// A server with the production pacing but a small free allowance of starts, to test the proof of
+/// work without making hundreds of sign-ups.
+async fn throttled(free: i64, max: i64) -> Server {
+    server_policy(
+        Limits {
+            signup_start_free_per_prefix: Limit::new(free, Duration::from_secs(3600)),
+            signup_start_max_per_prefix: Limit::new(max, Duration::from_secs(3600)),
+            ..generous()
+        },
+        test_policy(),
+    )
+    .await
+}
+
+fn proof_of(body: &Value) -> Value {
+    let challenge = body["challenge"].as_str().expect("a challenge");
+    let bits = u32::try_from(body["bits"].as_u64().expect("bits")).expect("bits");
+    let raw: Vec<u8> = (0..challenge.len() / 2)
+        .map(|i| u8::from_str_radix(&challenge[2 * i..2 * i + 2], 16).expect("hex"))
+        .collect();
+    // A random start, as a client does: every start must find a solution of its own.
+    let random = Uuid::new_v4();
+    let start = u32::from_be_bytes(random.as_bytes()[..4].try_into().expect("4 bytes"));
+    let nonce = orbyn_crypto::pow::solve_from(&raw, bits, start).expect("a solution");
+    json!({"challenge": challenge, "nonce": nonce})
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn past_the_free_starts_a_prefix_must_solve_a_proof_and_a_solution_buys_one_start() {
+    let _turn = TURN.lock().await;
+    let server = throttled(3, 6).await;
+    let keys = || DeviceKeys::generate().expect("keys");
+    let ip = ip_in(130, 1);
+    let upload = |email: String| {
+        let server = &server;
+        async move { server.registration_upload(&email, b"pw").await }
+    };
+    for _ in 0..3 {
+        let email = email();
+        let u = upload(email.clone()).await;
+        assert_eq!(
+            server
+                .register_finish_from(ip, &email, &u, &keys(), None)
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+    }
+    // The fourth is asked for a proof: 428, with a challenge and the bits, and nothing is stored.
+    let email = email();
+    let u = upload(email.clone()).await;
+    let (status, ask) = server
+        .register_finish_from(ip, &email, &u, &keys(), None)
+        .await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{ask}");
+    assert_eq!(ask["code"], "proof_required");
+    assert_eq!(ask["bits"], 8);
+    assert_eq!(rows(&server, &email).await, 0);
+    // The same ask again for the same prefix and the same ten minutes.
+    let (_, again) = server
+        .register_finish_from(ip, &email, &u, &keys(), None)
+        .await;
+    assert_eq!(again["challenge"], ask["challenge"]);
+    // Another prefix is asked a different challenge.
+    let (_, other) = server
+        .register_finish_from(ip_in(131, 1), &email, &u, &keys(), None)
+        .await;
+    assert_eq!(
+        other.get("challenge"),
+        None,
+        "a prefix with starts left is not asked"
+    );
+    let proof = proof_of(&ask);
+    let (status, body) = server
+        .register_finish_from(ip, &email, &u, &keys(), Some(proof.clone()))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    // A solution buys one start: the same proof again is asked for again.
+    let email2 = self::email();
+    let u2 = upload(email2.clone()).await;
+    let (status, ask2) = server
+        .register_finish_from(ip, &email2, &u2, &keys(), Some(proof))
+        .await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{ask2}");
+    // A proof for another prefix's challenge, a wrong nonce and a made-up challenge all fail.
+    let mut forged = proof_of(&ask2);
+    forged["nonce"] = json!(forged["nonce"].as_u64().expect("nonce") ^ 1);
+    let (status, _) = server
+        .register_finish_from(ip, &email2, &u2, &keys(), Some(forged))
+        .await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    let (status, _) = server
+        .register_finish_from(
+            ip,
+            &email2,
+            &u2,
+            &keys(),
+            Some(json!({"challenge": "00".repeat(32), "nonce": 0})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    let (status, _) = server
+        .register_finish_from(
+            ip,
+            &email2,
+            &u2,
+            &keys(),
+            Some(json!({"challenge": "zz", "nonce": 0})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    // A challenge asked of one prefix does not open another prefix's, even solved.
+    let (_, ask_here) = server
+        .register_finish_from(ip, &email2, &u2, &keys(), None)
+        .await;
+    for _ in 0..3 {
+        let e = self::email();
+        let up = upload(e.clone()).await;
+        server
+            .register_finish_from(ip_in(132, 1), &e, &up, &keys(), None)
+            .await;
+    }
+    let (status, _) = server
+        .register_finish_from(
+            ip_in(132, 1),
+            &email2,
+            &u2,
+            &keys(),
+            Some(proof_of(&ask_here)),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::PRECONDITION_REQUIRED,
+        "the challenge is for one prefix"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_hard_cap_per_prefix_refuses_even_with_a_proof_and_asks_the_same_of_every_address() {
+    let _turn = TURN.lock().await;
+    let server = throttled(1, 3).await;
+    let ip = ip_in(133, 1);
+    let taken = email();
+    server
+        .register(&taken, b"owner", &DeviceKeys::generate().expect("keys"))
+        .await;
+    let fresh = email();
+    // Starts for a taken and a free address are counted alike: the same first free start, the same
+    // ask, the same refusal at the cap.
+    let mut seen = Vec::new();
+    for (n, who) in [&fresh, &taken, &fresh, &taken, &fresh, &taken]
+        .into_iter()
+        .enumerate()
+    {
+        let u = server.registration_upload(who, b"pw").await;
+        let keys = DeviceKeys::generate().expect("keys");
+        let mut answer = server.register_finish_from(ip, who, &u, &keys, None).await;
+        if answer.0 == StatusCode::PRECONDITION_REQUIRED {
+            let proof = proof_of(&answer.1);
+            answer = server
+                .register_finish_from(ip, who, &u, &keys, Some(proof))
+                .await;
+        }
+        seen.push((n, answer.0, answer.1.get("signup_id").is_some()));
+    }
+    let statuses: Vec<StatusCode> = seen.iter().map(|s| s.1).collect();
+    // One free start, then two more with a proof, then the cap: the same for either address.
+    assert_eq!(
+        statuses,
+        [
+            StatusCode::CREATED,
+            StatusCode::CREATED,
+            StatusCode::CREATED,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::TOO_MANY_REQUESTS,
+        ],
+        "{seen:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn an_attacker_spending_a_prefixs_starts_cannot_stop_the_owner_from_signing_up() {
+    let _turn = TURN.lock().await;
+    // Engine#42 B1: the caps were per address, so ten starts from one address locked its owner out.
+    let server = throttled(2, 4).await;
+    let email = email();
+    let attacker = ip_in(134, 1);
+    let upload = server.registration_upload(&email, b"attacker").await;
+    for _ in 0..8 {
+        let keys = DeviceKeys::generate().expect("keys");
+        let mut a = server
+            .register_finish_from(attacker, &email, &upload, &keys, None)
+            .await;
+        if a.0 == StatusCode::PRECONDITION_REQUIRED {
+            a = server
+                .register_finish_from(attacker, &email, &upload, &keys, Some(proof_of(&a.1)))
+                .await;
+        }
+        let _ = a;
+    }
+    // The attacker's prefix is spent. The owner, from theirs, starts and is mailed a code that
+    // opens their sign-up, at the first try.
+    let owner_upload = server.registration_upload(&email, b"owner pw").await;
+    let (status, owner) = server
+        .register_finish_from(
+            ip_in(135, 1),
+            &email,
+            &owner_upload,
+            &DeviceKeys::generate().expect("keys"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{owner}");
+    let code = server.code_for(&email).await;
+    let (status, session) = server.verify(&owner["signup_id"], &code).await;
+    assert_eq!(status, StatusCode::CREATED, "{session}");
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn burning_a_codes_guesses_cannot_lock_the_owner_out_a_resend_makes_a_new_code() {
+    let _turn = TURN.lock().await;
+    // Engine#42 B1, second route: ten wrong guesses from two prefixes kill the active code.
+    let server = server_with(generous()).await;
+    let email = email();
+    let (id, code) = start_with_code(&server, &email).await;
+    let wrong = other_than(&code);
+    for prefix in [140u8, 141] {
+        for host in 1..=5 {
+            assert_eq!(
+                verify_from(&server, ip_in(prefix, host), &id, &wrong).await,
+                refused()
+            );
+        }
+    }
+    assert_eq!(
+        verify_from(&server, ip_in(142, 1), &id, &code).await,
+        refused(),
+        "the burned code is dead, the right one included"
+    );
+    // The owner asks again: a new code is made and mailed at once (a start would do the same),
+    // and it works.
+    let (status, _) = server.resend(&id).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let fresh = server.code_for(&email).await;
+    assert_ne!(fresh, code);
+    assert_eq!(
+        verify_from(&server, ip_in(143, 1), &id, &fresh).await.0,
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_guess_budget_belongs_to_the_code_for_its_whole_life_and_starts_do_not_renew_it() {
+    let _turn = TURN.lock().await;
+    // Engine#42, the medium finding: copying the active digest into new starts kept one code alive
+    // across windows and gave it a new budget in each. Now the counter lives with the code.
+    let server = server_with(generous()).await;
+    let email = email();
+    let norm = normalized(&email);
+    let (id, code) = start_with_code(&server, &email).await;
+    let wrong = other_than(&code);
+    let guesses = || {
+        let norm = norm.clone();
+        let server = &server;
+        async move {
+            orbyn_core::sqlx::query_scalar::<_, i32>(
+                "SELECT wrong_guesses FROM signup_codes WHERE email = $1",
+            )
+            .bind(norm)
+            .fetch_one(server.db.pool())
+            .await
+            .expect("record")
+        }
+    };
+    for host in 1..=4 {
+        verify_from(&server, ip_in(150, host), &id, &wrong).await;
+    }
+    for host in 1..=2 {
+        verify_from(&server, ip_in(151, host), &id, &wrong).await;
+    }
+    assert_eq!(guesses().await, 6);
+    // Starts and resends, any number of them, do not touch the count or the code.
+    for host in 1..=8 {
+        let upload = server.registration_upload(&email, b"pw").await;
+        server
+            .register_finish_from(
+                ip_in(152, host),
+                &email,
+                &upload,
+                &DeviceKeys::generate().expect("keys"),
+                None,
+            )
+            .await;
+    }
+    server.resend(&id).await;
+    assert_eq!(guesses().await, 6, "no start renewed the budget");
+    assert_eq!(
+        server.code_for(&email).await,
+        code,
+        "and none changed the code"
+    );
+    // Four more wrong guesses end it.
+    for host in 1..=4 {
+        verify_from(&server, ip_in(153, host), &id, &wrong).await;
+    }
+    assert_eq!(guesses().await, 10);
+    assert_eq!(
+        verify_from(&server, ip_in(154, 1), &id, &code).await,
+        refused()
+    );
+    // The code lives thirty minutes from when it was made, whatever else happens.
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET wrong_guesses = 0, expires_at = now() - interval '1 second' WHERE email = $1",
+    )
+    .bind(&norm)
+    .execute(server.db.pool())
+    .await
+    .expect("expire");
+    assert_eq!(
+        verify_from(&server, ip_in(155, 1), &id, &code).await,
+        refused()
+    );
+    server.resend(&id).await;
+    let renewed = server.code_for(&email).await;
+    assert_ne!(renewed, code, "an expired code is replaced, not revived");
+    assert_eq!(guesses().await, 0);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_guess_budget_is_the_same_for_the_ids_of_a_free_address_and_a_taken_one() {
+    let _turn = TURN.lock().await;
+    // Engine#42 B2: real rows shared one budget and decoys each had their own, which told a
+    // taken address from a free one in about thirteen requests. Now both share the address's.
+    let (server, trace) = server_traced(generous()).await;
+    let free = email();
+    let taken = email();
+    server
+        .register(&taken, b"owner", &DeviceKeys::generate().expect("keys"))
+        .await;
+    let ids = |email: String| {
+        let server = &server;
+        async move {
+            let mut ids = Vec::new();
+            for host in 1..=2 {
+                let upload = server.registration_upload(&email, b"pw").await;
+                let (_, body) = server
+                    .register_finish_from(
+                        ip_in(160, host),
+                        &email,
+                        &upload,
+                        &DeviceKeys::generate().expect("keys"),
+                        None,
+                    )
+                    .await;
+                ids.push(body["signup_id"].clone());
+            }
+            ids
+        }
+    };
+    let (free_ids, taken_ids) = (ids(free.clone()).await, ids(taken.clone()).await);
+    let count_for = |email: String| {
+        let server = &server;
+        async move {
+            orbyn_core::sqlx::query_scalar::<_, i32>(
+                "SELECT wrong_guesses FROM signup_codes WHERE email = $1",
+            )
+            .bind(normalized(&email))
+            .fetch_one(server.db.pool())
+            .await
+            .expect("record")
+        }
+    };
+    // The same thirteen wrong guesses, alternating between the two ids of each address, from
+    // prefixes that do not run out (one guess from each).
+    let mut free_answers = Vec::new();
+    let mut taken_answers = Vec::new();
+    let mut free_steps = Vec::new();
+    let mut taken_steps = Vec::new();
+    for n in 0..13u8 {
+        let ip = ip_in(170 + n, 1);
+        let m = trace.lock().expect("trace").len();
+        free_answers
+            .push(verify_from(&server, ip, &free_ids[usize::from(n % 2)], "33333333").await);
+        free_steps.push(steps_since(&trace, m));
+        let m = trace.lock().expect("trace").len();
+        taken_answers
+            .push(verify_from(&server, ip, &taken_ids[usize::from(n % 2)], "33333333").await);
+        taken_steps.push(steps_since(&trace, m));
+    }
+    assert_eq!(free_answers, taken_answers, "the same answer every time");
+    assert_eq!(free_steps, taken_steps, "the same steps every time");
+    // The budget is the address's, shared by its ids, and alike for both: every guess counted
+    // against it, a guess at a dead code included, which fails like any other.
+    assert_eq!(count_for(free).await, 13);
+    assert_eq!(count_for(taken).await, 13);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_start_takes_the_same_steps_for_a_new_a_taken_and_a_pending_address() {
+    let _turn = TURN.lock().await;
+    let (server, trace) = server_traced(generous()).await;
+    let fresh = email();
+    let taken = email();
+    server
+        .register(&taken, b"owner", &DeviceKeys::generate().expect("keys"))
+        .await;
+    let pending = email();
+    start_with_code(&server, &pending).await;
+    let mut seen = Vec::new();
+    for (n, who) in [&fresh, &taken, &pending].into_iter().enumerate() {
+        let upload = server.registration_upload(who, b"pw").await;
+        let mark = trace.lock().expect("trace").len();
+        let (status, _) = server
+            .register_finish_from(
+                ip_in(180 + u8::try_from(n).expect("n"), 1),
+                who,
+                &upload,
+                &DeviceKeys::generate().expect("keys"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        seen.push(steps_since(&trace, mark));
+    }
+    assert_eq!(seen[0], seen[1], "a new and a taken address");
+    assert_eq!(seen[0], seen[2], "a new and a pending address");
+    // And there is no shortcut: every step is there, the code record and the mail included.
+    for step in [
+        "start-throttle",
+        "lock",
+        "code-record",
+        "mail",
+        "evict",
+        "insert",
+        "commit",
+    ] {
+        assert!(seen[0].contains(&step), "{step} in {:?}", seen[0]);
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn every_sign_up_answer_takes_at_least_the_response_floor_whatever_the_outcome() {
+    let _turn = TURN.lock().await;
+    let floor = Duration::from_millis(300);
+    let server = server_policy(
+        generous(),
+        orbyn_core::accounts::SignupPolicy {
+            response_floor: floor,
+            ..test_policy()
+        },
+    )
+    .await;
+    let taken = email();
+    server
+        .register(&taken, b"owner", &DeviceKeys::generate().expect("keys"))
+        .await;
+    let fresh = email();
+    let upload_fresh = server.registration_upload(&fresh, b"pw").await;
+    let upload_taken = server.registration_upload(&taken, b"pw").await;
+    let timed = |label: &'static str, started: std::time::Instant| {
+        assert!(
+            started.elapsed() >= floor,
+            "{label} took {:?}, under the floor",
+            started.elapsed()
+        );
+    };
+    for (who, upload) in [(&fresh, &upload_fresh), (&taken, &upload_taken)] {
+        let started = std::time::Instant::now();
+        let (status, body) = server
+            .register_finish_with(who, upload, &DeviceKeys::generate().expect("keys"))
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        timed("a start", started);
+        let id = body["signup_id"].clone();
+        let started = std::time::Instant::now();
+        assert_eq!(server.verify(&id, "22222222").await, refused());
+        timed("a wrong code", started);
+        let started = std::time::Instant::now();
+        assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+        timed("a resend", started);
+    }
+    // An id nobody made, and a refusal for a bad address, wait the same.
+    let started = std::time::Instant::now();
+    assert_eq!(
+        server
+            .verify(&json!(Uuid::new_v4().to_string()), "22222222")
+            .await,
+        refused()
+    );
+    timed("an unknown id", started);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        server.resend(&json!(Uuid::new_v4().to_string())).await.0,
+        StatusCode::NO_CONTENT
+    );
+    timed("an unknown resend", started);
+    let started = std::time::Instant::now();
+    let (status, _) = server
+        .call(
+            Method::POST,
+            "/v1/accounts/register/finish",
+            None,
+            Some(json!({
+                "email": "not an address",
+                "registration_upload": b64(&upload_fresh),
+                "device": device_json("Laptop", &DeviceKeys::generate().expect("keys").public()),
+                "device_signature": b64(&[0u8; 64]),
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    timed("a bad address", started);
+}
+
+/// What the pacing is for the tests of the ceiling on replacing spent codes: nothing is paced
+/// except that, and the ceiling is the production one (3 at once, then one an hour).
+fn ceiling_policy() -> orbyn_core::accounts::SignupPolicy {
+    orbyn_core::accounts::SignupPolicy {
+        spent_free: 3,
+        spent_gap: Duration::from_secs(3600),
+        ..test_policy()
+    }
+}
+
+/// Spends the address's current code: ten wrong guesses from two prefixes.
+async fn spend_the_code(server: &Server, id: &Value, prefix: u8) {
+    for p in [prefix, prefix + 1] {
+        for host in 1..=5 {
+            verify_from(server, ip_in(p, host), id, "22222222").await;
+        }
+    }
+}
+
+async fn code_mails(server: &Server, norm: &str) -> usize {
+    server.mailbox().await.count(norm, Kind::VerifyEmail)
+}
+
+async fn expire_the_code(server: &Server, norm: &str) {
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET expires_at = now() - interval '1 second' WHERE email = $1",
+    )
+    .bind(norm)
+    .execute(server.db.pool())
+    .await
+    .expect("expire");
+}
+
+async fn code_record(server: &Server, email: &str) -> (i32, i32) {
+    orbyn_core::sqlx::query_as::<_, (i32, i32)>(
+        "SELECT wrong_guesses, spent_count FROM signup_codes WHERE email = $1",
+    )
+    .bind(normalized(email))
+    .fetch_one(server.db.pool())
+    .await
+    .expect("record")
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn spent_codes_are_replaced_at_once_three_times_a_day_and_then_one_an_hour_never_refused() {
+    let _turn = TURN.lock().await;
+    // Reviewer 26 on engine#97: a dead code was replaced by the next start, so an address had no
+    // ceiling on guesses however many prefixes they came from.
+    let server = server_policy(generous(), ceiling_policy()).await;
+    let email = email();
+    let norm = normalized(&email);
+    let (id, mut code) = start_with_code(&server, &email).await;
+    // The first three spent codes are replaced as soon as the owner or anyone asks.
+    for round in 1..=3 {
+        spend_the_code(&server, &id, 10 * round as u8).await;
+        assert_eq!(
+            verify_from(&server, ip_in(99, 1), &id, &code).await,
+            refused(),
+            "round {round}: the spent code is dead, the right one included"
+        );
+        assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+        let fresh = server.code_for(&email).await;
+        assert_ne!(fresh, code, "round {round}");
+        code = fresh;
+        assert_eq!(code_record(&server, &email).await, (0, round));
+    }
+    assert_eq!(code_mails(&server, &norm).await, 4);
+    // The fourth is a delay: starts and resends still work and answer the same, but no new code
+    // is made and none is mailed, however many ask and from however many prefixes.
+    spend_the_code(&server, &id, 50).await;
+    for host in 1..=6 {
+        assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+        let upload = server.registration_upload(&email, b"owner").await;
+        let (status, _) = server
+            .register_finish_from(
+                ip_in(60, host),
+                &email,
+                &upload,
+                &DeviceKeys::generate().expect("keys"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "the owner's start still works");
+    }
+    assert_eq!(
+        code_mails(&server, &norm).await,
+        4,
+        "no new code inside the gap"
+    );
+    assert_eq!(
+        verify_from(&server, ip_in(99, 2), &id, &code).await,
+        refused()
+    );
+    assert_eq!(
+        code_record(&server, &email).await.1,
+        3,
+        "and the count did not move"
+    );
+    // When the gap is over the next ask makes it, once.
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET last_spent_at = now() - interval '61 minutes' WHERE email = $1",
+    )
+    .bind(&norm)
+    .execute(server.db.pool())
+    .await
+    .expect("age");
+    assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(code_mails(&server, &norm).await, 5);
+    let fresh = server.code_for(&email).await;
+    assert_ne!(fresh, code);
+    assert_eq!(code_record(&server, &email).await, (0, 4));
+    // That is the ceiling: a day holds at most three at once and one each hour after, so ten
+    // guesses a code cannot become more than a few hundred a day at one address.
+    assert_eq!(
+        verify_from(&server, ip_in(99, 3), &id, &fresh).await.0,
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_code_that_expired_with_some_wrong_guesses_counts_as_spent_and_a_clean_one_does_not() {
+    let _turn = TURN.lock().await;
+    let server = server_policy(generous(), ceiling_policy()).await;
+    let email = email();
+    let norm = normalized(&email);
+    let (id, code) = start_with_code(&server, &email).await;
+    // A clean expiry (no guesses) is replaced without counting, as often as it happens.
+    for _ in 0..5 {
+        expire_the_code(&server, &norm).await;
+        server.resend(&id).await;
+    }
+    assert_eq!(code_record(&server, &email).await, (0, 0));
+    // Nine guesses spread over expiries (never ten) still count as spent, so the same ceiling
+    // holds for guessing slowly.
+    let wrong = other_than(&server.code_for(&email).await);
+    for n in 1..=3u8 {
+        verify_from(&server, ip_in(70 + n, 1), &id, &wrong).await;
+        expire_the_code(&server, &norm).await;
+        server.resend(&id).await;
+    }
+    assert_eq!(code_record(&server, &email).await, (0, 3));
+    let _ = code;
+    // The fourth spent expiry is past the three free and inside the gap: no new code.
+    verify_from(&server, ip_in(90, 1), &id, &wrong).await;
+    expire_the_code(&server, &norm).await;
+    let before = server.mailbox().await.count(&norm, Kind::VerifyEmail);
+    server.resend(&id).await;
+    assert_eq!(
+        server.mailbox().await.count(&norm, Kind::VerifyEmail),
+        before,
+        "delayed"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_delay_is_the_same_for_a_taken_address() {
+    let _turn = TURN.lock().await;
+    let server = server_policy(generous(), ceiling_policy()).await;
+    let taken = email();
+    server
+        .register(&taken, b"owner", &DeviceKeys::generate().expect("keys"))
+        .await;
+    let upload = server.registration_upload(&taken, b"intruder").await;
+    let (_, body) = server
+        .register_finish_from(
+            ip_in(100, 1),
+            &taken,
+            &upload,
+            &DeviceKeys::generate().expect("keys"),
+            None,
+        )
+        .await;
+    let id = body["signup_id"].clone();
+    // Spend the (never mailed) code four times: three replaced, the fourth delayed, exactly as for
+    // a free address, so the pattern does not tell them apart.
+    let mut seen = Vec::new();
+    for round in 0..4u8 {
+        spend_the_code(&server, &id, 110 + 3 * round).await;
+        server.resend(&id).await;
+        seen.push(code_record(&server, &taken).await);
+    }
+    assert_eq!(seen, [(0, 1), (0, 2), (0, 3), (10, 3)]);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn young_rows_are_not_evicted_by_the_addresss_cap() {
+    let _turn = TURN.lock().await;
+    // Reviewer 26: twenty newer starts from ten prefixes pushed the owner's row out.
+    let server = server_with(generous()).await;
+    let email = email();
+    let upload = server.registration_upload(&email, b"pw").await;
+    let (_, owner) = server
+        .register_finish_from(
+            ip_in(140, 1),
+            &email,
+            &upload,
+            &DeviceKeys::generate().expect("keys"),
+            None,
+        )
+        .await;
+    for prefix in 141..=160u8 {
+        for host in 1..=2 {
+            server
+                .register_finish_from(
+                    ip_in(prefix, host),
+                    &email,
+                    &upload,
+                    &DeviceKeys::generate().expect("keys"),
+                    None,
+                )
+                .await;
+        }
+    }
+    let alive = count(
+        &server,
+        "SELECT count(*) FROM pending_signups WHERE id::text = $1",
+        owner["signup_id"].as_str().expect("id"),
+    )
+    .await;
+    assert_eq!(alive, 1, "the owner's quarter-hour-old row survived");
+    assert!(
+        rows(&server, &email).await > 20,
+        "the address held more than twenty meanwhile"
+    );
+    // Once rows are older than the quarter hour the cap evicts them again, oldest first.
+    orbyn_core::sqlx::query(
+        "UPDATE pending_signups SET created_at = created_at - interval '20 minutes' WHERE email = $1",
+    )
+    .bind(normalized(&email))
+    .execute(server.db.pool())
+    .await
+    .expect("age");
+    server
+        .register_finish_from(
+            ip_in(170, 1),
+            &email,
+            &upload,
+            &DeviceKeys::generate().expect("keys"),
+            None,
+        )
+        .await;
+    assert_eq!(rows(&server, &email).await, 20);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_proof_is_not_spent_on_a_start_the_hard_cap_refuses() {
+    let _turn = TURN.lock().await;
+    let server = throttled(1, 2).await;
+    let ip = ip_in(180, 1);
+    let keys = || DeviceKeys::generate().expect("keys");
+    let start = |who: String, proof: Option<Value>| {
+        let server = &server;
+        async move {
+            let u = server.registration_upload(&who, b"pw").await;
+            server
+                .register_finish_from(ip, &who, &u, &keys(), proof)
+                .await
+        }
+    };
+    assert_eq!(start(email(), None).await.0, StatusCode::CREATED);
+    let (status, ask) = start(email(), None).await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    let proof = proof_of(&ask);
+    assert_eq!(start(email(), Some(proof)).await.0, StatusCode::CREATED);
+    // The cap is reached. A second proof is asked for and solved, and the cap refuses the start
+    // it was solved for: that proof must still be unspent.
+    let (status, ask) = start(email(), None).await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    let proof = proof_of(&ask);
+    assert_eq!(
+        start(email(), Some(proof.clone())).await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // Free the cap and the unspent proof buys the start it was solved for.
+    orbyn_core::sqlx::query("DELETE FROM auth_attempts WHERE action = 'signup-start-max'")
+        .execute(server.db.pool())
+        .await
+        .expect("clear the cap");
+    assert_eq!(start(email(), Some(proof)).await.0, StatusCode::CREATED);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_code_may_be_typed_in_any_case_with_a_hyphen_or_spaces_and_is_eight_symbols_of_the_alphabet()
+ {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let email = email();
+    let (id, code) = start_with_code(&server, &email).await;
+    // Mailed whole: 8 symbols, none of 0, 1, O, I, L or U.
+    assert!(orbyn_core::email_code::is_code(&code), "{code}");
+    assert!(code.bytes().all(|b| !b"01OILU".contains(&b)));
+    // Wrong in every way a person can get it wrong, each refused the same: another code, a code
+    // with a character changed, one too short, one too long, one with an O for the 0 it never has.
+    let mut nearly = code.clone().into_bytes();
+    nearly[7] = if nearly[7] == b'2' { b'3' } else { b'2' };
+    for wrong in [
+        other_than(&code),
+        String::from_utf8(nearly).expect("ascii"),
+        code[..7].to_owned(),
+        format!("{code}2"),
+        code.replace('2', "O"),
+        "K7QM-R4T0".into(),
+    ] {
+        if wrong == code {
+            continue;
+        }
+        assert_eq!(
+            verify_from(&server, ip_in(190, 1), &id, &wrong).await,
+            refused(),
+            "{wrong}"
+        );
+    }
+    // The right code, typed with lower case, a hyphen in the middle and spaces round it.
+    let typed = format!(
+        " {}-{}  ",
+        code[..4].to_lowercase(),
+        code[4..].to_lowercase()
+    );
+    let (status, session) = server.verify(&id, &typed).await;
+    assert_eq!(status, StatusCode::CREATED, "{session}");
 }
 
 // ---- Deleting an account ----
@@ -4757,8 +5771,8 @@ async fn the_worker_deletes_a_due_account_and_nothing_of_it_remains() {
     let signup = Uuid::new_v4();
     orbyn_core::sqlx::query(
         "INSERT INTO pending_signups (id, email, password_file, device_name, device_platform,
-             device_signing_key, device_agreement_key, code_digest, expires_at)
-         VALUES ($1, $2, decode('01', 'hex'), 'Phone', 'web', $3, $3, $3, now() + interval '30 minutes')",
+             device_signing_key, device_agreement_key, expires_at)
+         VALUES ($1, $2, decode('01', 'hex'), 'Phone', 'web', $3, $3, now() + interval '30 minutes')",
     )
     .bind(signup)
     .bind(normalized(&email))
@@ -4934,9 +5948,13 @@ async fn a_cancel_that_gets_the_lock_first_beats_the_worker() {
         .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     server.make_due(account).await;
-    assert_eq!(
-        worker.due_for_deletion(100).await.expect("due"),
-        vec![account]
+    // Other accounts in a shared database may be due too: this one is among them.
+    assert!(
+        worker
+            .due_for_deletion(1000)
+            .await
+            .expect("due")
+            .contains(&account)
     );
     let (status, _) = server
         .cancel_deletion(&session, cancel_body(&session, &laptop))
@@ -7987,7 +9005,7 @@ async fn a_decoy_never_uses_up_an_invite_and_looks_like_a_real_sign_up() {
         "a decoy records the invite too, so it takes the same steps"
     );
     // Whatever code is tried, it fails as it always did, and the invite is not touched.
-    let (status, body) = server.verify(&decoy["signup_id"], "123456").await;
+    let (status, body) = server.verify(&decoy["signup_id"], "22222222").await;
     assert_eq!(
         (status, body["code"].clone()),
         (StatusCode::BAD_REQUEST, json!("invalid_email_code"))

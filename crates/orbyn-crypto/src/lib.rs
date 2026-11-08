@@ -14,6 +14,7 @@
 //! Every operation binds a context string into the authenticated data, so a value
 //! sealed for one purpose can never be opened as another.
 
+pub mod pow;
 mod service_key;
 mod wrap_p256;
 

@@ -104,6 +104,16 @@ impl IntoResponse for Failure {
                     "The request body is larger than 64 KiB.",
                 );
             }
+            Self::Account(AccountError::ProofRequired { challenge, bits }) => {
+                let body = wire::ProofRequired {
+                    code: "proof_required".to_owned(),
+                    message: "Too many sign-ups from here. Solve the proof of work and try again."
+                        .to_owned(),
+                    challenge,
+                    bits,
+                };
+                return (StatusCode::PRECONDITION_REQUIRED, Json(body)).into_response();
+            }
             Self::Account(AccountError::SecondFactorRequired { login_id }) => {
                 let body = wire::SecondFactorRequired {
                     code: "second_factor_required".to_owned(),
@@ -126,6 +136,10 @@ impl IntoResponse for Failure {
             // Answered above with its login id; never reached.
             AccountError::SecondFactorRequired { .. } => {
                 (StatusCode::UNAUTHORIZED, "second_factor_required")
+            }
+            // Answered above with its challenge; never reached.
+            AccountError::ProofRequired { .. } => {
+                (StatusCode::PRECONDITION_REQUIRED, "proof_required")
             }
             AccountError::SecondFactorFailed => (StatusCode::UNAUTHORIZED, "second_factor_failed"),
             AccountError::ReauthenticationRequired => {
@@ -391,6 +405,7 @@ async fn register_finish(
             &new_device(&body.device)?,
             &fixed(&body.device_signature)?,
             body.invite.as_deref(),
+            body.proof.as_ref().map(|p| (p.challenge.as_str(), p.nonce)),
         )
         .await?;
     Ok((

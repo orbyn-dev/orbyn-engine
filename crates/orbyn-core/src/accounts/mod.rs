@@ -71,6 +71,10 @@ pub enum AccountError {
     LoginFailed,
     #[error("too many attempts; try again later")]
     TooManyAttempts,
+    /// This client prefix has used its free sign-up starts: solve `challenge` at `bits` bits
+    /// (`orbyn_crypto::pow`) and start again with the nonce.
+    #[error("a proof of work is needed to sign up from here")]
+    ProofRequired { challenge: String, bits: u32 },
     /// The password was right and the account has a second factor: nothing is signed in yet. Send
     /// the code and this login id to the second-factor step.
     #[error("a second factor is required")]
@@ -431,6 +435,41 @@ pub struct Accounts {
     /// mode fails closed; the server sets it from `ORBYN_SIGNUP` (also `invite` by default), and a
     /// test that signs people up asks for `Open`.
     signup: crate::SignupMode,
+    /// The sign-up pacing (see [`SignupPolicy`]).
+    policy: SignupPolicy,
+}
+
+/// The knobs of the sign-up throttle that are times and costs, not counts (those are in
+/// [`Limits`]). The defaults are the production ones; a test sets its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignupPolicy {
+    /// The shortest time between two mails about one address from starts and resends. The mail is
+    /// the same code (or the notice), so a start inside it loses the owner nothing.
+    pub mail_pace: Duration,
+    /// Every sign-up start, resend and verification takes at least this long to answer, so the time
+    /// does not tell an address's state.
+    pub response_floor: Duration,
+    /// Leading zero bits of the proof of work asked past the free allowance of starts.
+    pub pow_bits: u32,
+    /// How many spent codes (a code with a wrong guess against it that died or expired) an
+    /// address may have replaced at once in a day. After that a spent code is replaced one at a
+    /// time, `spent_gap` apart. This is what bounds guessing at an address, whatever number of IP
+    /// prefixes the guesses come from; the price is that, while someone keeps spending an
+    /// address's codes, its owner waits for the next one.
+    pub spent_free: u32,
+    pub spent_gap: Duration,
+}
+
+impl Default for SignupPolicy {
+    fn default() -> Self {
+        Self {
+            mail_pace: Duration::from_secs(60),
+            response_floor: Duration::from_millis(250),
+            pow_bits: 18,
+            spent_free: 3,
+            spent_gap: Duration::from_secs(60 * 60),
+        }
+    }
 }
 
 /// The time a TOTP code or a device's signature is judged against, in Unix seconds. The system
@@ -454,6 +493,7 @@ impl Accounts {
             trace: None,
             account_url: None,
             signup: crate::SignupMode::Invite,
+            policy: SignupPolicy::default(),
         }
     }
 
@@ -467,6 +507,7 @@ impl Accounts {
             trace: None,
             account_url: None,
             signup: crate::SignupMode::Invite,
+            policy: SignupPolicy::default(),
         }
     }
 
@@ -483,6 +524,20 @@ impl Accounts {
     pub fn with_signup(mut self, mode: crate::SignupMode) -> Self {
         self.signup = mode;
         self
+    }
+
+    /// Replaces the sign-up pacing. For tests (and for an operator who wants a different floor).
+    pub fn with_signup_policy(mut self, policy: SignupPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Waits out what is left of the response floor since `started`.
+    async fn pad(&self, started: std::time::Instant) {
+        let wait = self.policy.response_floor.saturating_sub(started.elapsed());
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -611,6 +666,7 @@ impl Accounts {
     /// every address and every state of the limits: an address that is taken, has five pending
     /// sign-ups already, or is over its mail caps gets an id of the same shape that belongs to
     /// nobody.
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_finish(
         &self,
         client: &Client,
@@ -619,6 +675,26 @@ impl Accounts {
         device: &NewDevice,
         signature: &[u8; 64],
         invite: Option<&str>,
+        proof: Option<(&str, u32)>,
+    ) -> Result<Uuid> {
+        let started = std::time::Instant::now();
+        let result = self
+            .register_finish_inner(client, email, upload, device, signature, invite, proof)
+            .await;
+        self.pad(started).await;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn register_finish_inner(
+        &self,
+        client: &Client,
+        email: &str,
+        upload: &[u8],
+        device: &NewDevice,
+        signature: &[u8; 64],
+        invite: Option<&str>,
+        proof: Option<(&str, u32)>,
     ) -> Result<Uuid> {
         let email = normalize_email(email).ok_or(AccountError::InvalidEmail)?;
         let name = device.checked_name()?;
@@ -639,10 +715,10 @@ impl Accounts {
             .serialize()
             .to_vec();
 
-        // Every limiter runs before a transaction opens, and counts every start whatever the
-        // address's state, so nothing about the answer depends on it.
-        let plan = self.plan_start(&email).await?;
-        self.start_signup(&plan, &email, &password_file, device, &name, invite_id)
+        // The throttle keys on the client's prefix and never on the address, and runs before a
+        // transaction opens, so nothing about the answer depends on the address's state.
+        self.throttle_start(client, proof).await?;
+        self.start_signup(client, &email, &password_file, device, &name, invite_id)
             .await
     }
 
