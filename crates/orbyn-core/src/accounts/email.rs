@@ -1,28 +1,31 @@
 //! Email verification: sign-up makes no account and no session, only a pending sign-up that a
 //! code sent to the address turns into one.
 //!
-//! - Sign-up keeps what the account will need (the password record and the first device) in
-//!   `pending_signups` and answers a `signup_id`.
-//! - **One active code per address.** Every live, non-decoy sign-up of an address holds the
-//!   address's current code (a keyed digest). A code mail is made only when the address's caps
-//!   allow (5 an hour, 10 a day, counting only mails that go out), and sending one rotates the code
-//!   for all of them: the previous code stops working. A start the caps refuse still makes a
-//!   sign-up, which takes the code already active. So anyone can start sign-ups for an address, and
-//!   all it does is put a usable code in the owner's inbox: the owner verifies their own
-//!   `signup_id` with the newest code they received.
-//! - Verifying creates the account **only for the sign-up it names**, from that sign-up's own
-//!   password record and device, and deletes every other row of the address, so the code stops
-//!   working for all of them.
-//! - **Guessing** a code is limited to 5 wrong guesses from one IP prefix (an IPv4 /24, an IPv6
-//!   /64) and 10 from all of them: at 10 the code is dead until the next mail makes a new one.
-//!   That bounds guessing at 100 a day per address (10 mailed codes of 10 guesses).
-//! - **Decoys.** Sign-up always answers 201 `{signup_id}`, whatever the address's state and
-//!   whatever the limits say. A start that makes no sign-up (the address has an account, or five
-//!   real sign-ups already) stores a *decoy* row instead: a random digest that never matches, and
-//!   no code mail. Verifying and resending a decoy run exactly the steps they run for a real
-//!   sign-up (the same limiters, the same lock, the same row update), so neither the answer nor the
-//!   time tells them apart. An address has at most ten live rows in all, real and decoy, so a new
-//!   address and a taken one stop storing at the same start; past that the id belongs to nobody.
+//! **The throttle (engine#42).** Nothing here caps mail, starts or rows *per address*, because a
+//! cap keyed on an address is a cap a stranger can use up to lock the owner out. Starts are
+//! limited per client prefix instead, never per address, and one code path serves every state of
+//! an address.
+//!
+//! - **What is capped, by what key.** A start counts against its IP prefix (an IPv4 /24, an IPv6
+//!   /64): up to a free allowance it needs nothing, past it a proof of work (`orbyn_crypto::pow`,
+//!   asked for with 428 `proof_required` and solved by the client), past a hard cap it is refused.
+//!   Each prefix may hold two live rows per address and the address twenty; a newer row evicts the
+//!   oldest, so a start never fails and nobody needs room to be made for them.
+//! - **One code per address, derived, not stored.** An address with a live pending sign-up has
+//!   one code record: a random salt, an expiry (30 minutes), when it was last mailed and how many
+//!   wrong guesses it has had **in its whole life**. The six-digit code is derived from the server
+//!   secret, the address and the salt, so it can be mailed again without being kept anywhere.
+//! - **Any start or resend re-sends the active code**, at most once a minute per address (the
+//!   mail is the same code, so skipping one loses nothing), and **a new code is made only when the
+//!   active one has expired or died** (10 wrong guesses in all). The mail is therefore bounded by
+//!   the per-prefix limits, and nobody can make a code stop working by asking for another.
+//! - **One path for every state.** A free address, a taken one and one with sign-ups pending all
+//!   run the same statements in the same order: they differ only in the value of the code (a
+//!   decoy label that is never mailed, for a taken address) and in the one message queued (the
+//!   code, or the notice "someone tried to sign up with your address"). A refusal by a limit
+//!   answers like any other failure, and the answer takes at least a fixed time.
+//! - **Guessing** a code is limited to 5 wrong guesses from one IP prefix and 10 from all of them
+//!   in the code's life. A wrong guess at a dead code counts and fails like any other.
 
 use super::{
     AccountError, Accounts, AuditAction, Client, DeviceState, NewDevice, NewSession, Result,
@@ -33,136 +36,121 @@ use sqlx::{Postgres, Transaction};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-/// How long a pending sign-up lives from the moment it was made.
+/// How long a pending sign-up and its code live from the moment they were made.
 const SIGNUP_MINUTES: i32 = 30;
-/// Live real (non-decoy) sign-ups one address may have.
-const MAX_REAL_PER_ADDRESS: i64 = 5;
-/// Live rows, real and decoy, one address may have.
-const MAX_ROWS_PER_ADDRESS: i64 = 10;
+/// Wrong guesses a code survives, over its whole life.
+const MAX_WRONG_PER_CODE: i32 = 10;
+/// Live rows one prefix may hold for one address, and the address in all. A newer row evicts the
+/// oldest, so a start always succeeds.
+const MAX_ROWS_PER_PREFIX: i64 = 2;
+const MAX_ROWS_PER_ADDRESS: i64 = 20;
+/// How long a proof-of-work challenge is good for: the current ten minutes and the ten before.
+const POW_BUCKET_SECS: u64 = 10 * 60;
 
-/// A uniformly random six-digit code, by rejection so no digit is likelier than another.
-fn new_code() -> Result<String> {
-    loop {
-        let mut bytes = [0u8; 4];
-        getrandom::fill(&mut bytes).map_err(|_| AccountError::Internal)?;
-        let n = u32::from_be_bytes(bytes);
-        // The largest multiple of a million that fits; above it the remainder would be skewed.
-        if n < 4_294_000_000 {
-            return Ok(format!("{:06}", n % 1_000_000));
-        }
-    }
-}
-
-fn random_digest() -> Result<[u8; 32]> {
-    let mut bytes = [0u8; 32];
+fn random_salt() -> Result<[u8; 16]> {
+    let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| AccountError::Internal)?;
     Ok(bytes)
 }
 
-/// What the limiters said about a sign-up start. Every start, whatever the address's state, takes
-/// the same three limiter slots and gives back the ones it did not use.
-pub(super) struct StartPlan {
-    /// The address already has an account (verified or not).
-    pub taken: bool,
-    hour: bool,
-    day: bool,
-    notice: bool,
-}
-
-/// What a start sent, so its limiter slots can be settled.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Sent {
-    Code,
-    Notice,
-    Nothing,
-}
-
 impl Accounts {
-    fn code_digest(&self, email: &str, code: &str) -> [u8; 32] {
-        let mut data = email.as_bytes().to_vec();
-        data.push(0);
-        data.extend_from_slice(code.as_bytes());
-        self.secrets.digest("email-code", &data)
+    /// The six-digit code of an address's code record. Derived from the server secret, so it can
+    /// be mailed again without being stored; `label` separates the code that is mailed from the
+    /// one a taken address's decoy compares against, which is never mailed. Uniform over a million
+    /// by rejection.
+    fn signup_code(&self, label: &str, email: &str, salt: &[u8]) -> String {
+        let mut counter = 0u32;
+        loop {
+            let mut data = email.as_bytes().to_vec();
+            data.push(0);
+            data.extend_from_slice(salt);
+            data.extend_from_slice(&counter.to_be_bytes());
+            let digest = self.secrets.digest(label, &data);
+            let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+            // The largest multiple of a million that fits; above it the remainder would be skewed.
+            if n < 4_294_000_000 {
+                return format!("{:06}", n % 1_000_000);
+            }
+            counter += 1;
+        }
     }
 
     pub(super) fn address_digest(&self, label: &str, email: &str) -> [u8; 32] {
         self.secrets.digest(label, email.as_bytes())
     }
 
-    /// Takes a slot of the address's code mail caps (hour and day). Both are always tried, so a
-    /// refusal by one never hides the other. Returns whether each allowed.
-    async fn take_code_mail_slots(&self, email: &str) -> Result<(bool, bool)> {
-        let subject = self.address_digest("signup-address", email);
-        let hour = limits::allow(
-            &self.pool,
-            "signup-codes-hour",
-            &subject,
-            self.limits.signup_codes_per_hour,
-        )
-        .await?;
-        let day = limits::allow(
-            &self.pool,
-            "signup-codes-day",
-            &subject,
-            self.limits.signup_codes_per_day,
-        )
-        .await?;
-        Ok((hour, day))
+    /// The challenge a client at this prefix must answer for the ten minutes starting at `bucket`.
+    fn pow_challenge(&self, prefix: &[u8; 32], bucket: u64) -> [u8; 32] {
+        let mut data = prefix.to_vec();
+        data.extend_from_slice(&bucket.to_be_bytes());
+        self.secrets.digest("signup-pow", &data)
     }
 
-    async fn give_back_code_mail_slots(&self, email: &str, hour: bool, day: bool) -> Result<()> {
-        let subject = self.address_digest("signup-address", email);
-        if hour {
-            limits::give_back(&self.pool, "signup-codes-hour", &subject).await?;
-        }
-        if day {
-            limits::give_back(&self.pool, "signup-codes-day", &subject).await?;
-        }
-        Ok(())
-    }
-
-    /// Takes the limiter slots a start may use, before any transaction opens (the limiters use
-    /// their own connections). All three are taken for every start, so a new address, a taken one
-    /// and a full one do the same limiter work; what was not used is given back afterwards.
-    pub(super) async fn plan_start(&self, email: &str) -> Result<StartPlan> {
-        let taken: Option<i32> = sqlx::query_scalar("SELECT 1 FROM accounts WHERE email = $1")
-            .bind(email)
-            .fetch_optional(&self.pool)
-            .await?;
-        let (hour, day) = self.take_code_mail_slots(email).await?;
-        let notice = limits::allow(
+    /// Limits a sign-up start by its client prefix alone (see the module docs). Runs before any
+    /// transaction opens, takes the same slots for every address, and says nothing about one.
+    pub(super) async fn throttle_start(
+        &self,
+        client: &Client,
+        proof: Option<(&str, u32)>,
+    ) -> Result<()> {
+        self.step("start-throttle");
+        let prefix = self.ip_prefix_digest(client);
+        let within_free = limits::allow(
             &self.pool,
-            "signup-notice",
-            &self.address_digest("signup-notice", email),
-            self.limits.signup_notice_per_email,
+            "signup-start-free",
+            &prefix,
+            self.limits.signup_start_free_per_prefix,
         )
         .await?;
-        Ok(StartPlan {
-            taken: taken.is_some(),
-            hour,
-            day,
-            notice,
-        })
-    }
-
-    /// Gives back the slots a start took and did not use: only a mail that went out counts.
-    async fn settle_start(&self, email: &str, plan: &StartPlan, sent: Sent) -> Result<()> {
-        if sent != Sent::Code {
-            self.give_back_code_mail_slots(email, plan.hour, plan.day)
-                .await?;
-        }
-        if sent != Sent::Notice && plan.notice {
-            limits::give_back(
+        if !within_free {
+            let now_bucket = self.now() / POW_BUCKET_SECS;
+            let bits = self.policy.pow_bits;
+            let ask = || AccountError::ProofRequired {
+                challenge: orbyn_hex(&self.pow_challenge(&prefix, now_bucket)),
+                bits,
+            };
+            let Some((challenge, nonce)) = proof else {
+                return Err(ask());
+            };
+            let Some(given) = unhex32(challenge) else {
+                return Err(ask());
+            };
+            // The current ten minutes or the ten before (a client may be slow, or cross the edge).
+            let current: bool = given.ct_eq(&self.pow_challenge(&prefix, now_bucket)).into();
+            let before: bool = given
+                .ct_eq(&self.pow_challenge(&prefix, now_bucket.saturating_sub(1)))
+                .into();
+            if !(current || before) || !orbyn_crypto::pow::verify(&given, nonce, bits) {
+                return Err(ask());
+            }
+            // A solution buys one start.
+            let mut used = given.to_vec();
+            used.extend_from_slice(&nonce.to_be_bytes());
+            let fresh = limits::allow(
                 &self.pool,
-                "signup-notice",
-                &self.address_digest("signup-notice", email),
+                "signup-pow-used",
+                &self.secrets.digest("signup-pow-used", &used),
+                limits::Limit::new(1, std::time::Duration::from_secs(2 * POW_BUCKET_SECS)),
             )
             .await?;
+            if !fresh {
+                return Err(ask());
+            }
+        }
+        let within_max = limits::allow(
+            &self.pool,
+            "signup-start-max",
+            &prefix,
+            self.limits.signup_start_max_per_prefix,
+        )
+        .await?;
+        if !within_max {
+            return Err(AccountError::TooManyAttempts);
         }
         Ok(())
     }
 
-    /// Serializes everything that decides who gets an address: starts, rotations of its code, and
+    /// Serializes everything that decides who gets an address: starts, the making of its code, and
     /// the verifications that create its account. Held until the transaction ends.
     async fn lock_address(tx: &mut Transaction<'_, Postgres>, email: &str) -> Result<()> {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -191,179 +179,145 @@ impl Accounts {
         Ok(())
     }
 
-    /// Makes a new code for the address, for every live real sign-up of it, and mails it. The
-    /// previous code stops working.
-    async fn rotate_and_mail(
+    /// The one step a start and a resend share, for every address. Under the address lock: finds
+    /// the address's live code record, or makes a new one when there is none, it has expired, or it
+    /// has had 10 wrong guesses; and queues **one** message when the record is new or the last mail
+    /// is a minute old: the code for a free address, the notice for a taken one. Both take the same
+    /// statements; only the value queued differs.
+    async fn code_step(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         email: &str,
-        mailed_for: Uuid,
+        account: Option<Uuid>,
+        for_id: Uuid,
     ) -> Result<()> {
-        let code = new_code()?;
-        sqlx::query(
-            "UPDATE pending_signups SET code_digest = $2
-             WHERE email = $1 AND NOT decoy AND expires_at > now()",
+        self.step("code-record");
+        let live: Option<(Vec<u8>, bool)> = sqlx::query_as(
+            "SELECT salt, mailed_at <= now() - make_interval(secs => $3::float8)
+             FROM signup_codes
+             WHERE email = $1 AND expires_at > now() AND wrong_guesses < $2 FOR UPDATE",
         )
         .bind(email)
-        .bind(self.code_digest(email, &code).as_slice())
-        .execute(&mut **tx)
+        .bind(MAX_WRONG_PER_CODE)
+        .bind(self.policy.mail_pace.as_secs_f64())
+        .fetch_optional(&mut **tx)
         .await?;
-        self.queue_code(tx, mailed_for, email, code).await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn insert_row(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        id: Uuid,
-        email: &str,
-        decoy: bool,
-        password_file: &[u8],
-        device: &NewDevice,
-        name: &str,
-        digest: &[u8; 32],
-        invite_id: Option<Uuid>,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO pending_signups
-                 (id, email, decoy, password_file, device_name, device_platform,
-                  device_signing_key, device_agreement_key, code_digest, expires_at, invite_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + make_interval(mins => $10), $11)",
-        )
-        .bind(id)
-        .bind(email)
-        .bind(decoy)
-        .bind(password_file)
-        .bind(name)
-        .bind(device.platform.as_str())
-        .bind(device.keys.signing.as_slice())
-        .bind(device.keys.agreement.as_slice())
-        .bind(digest.as_slice())
-        .bind(SIGNUP_MINUTES)
-        .bind(invite_id)
-        .execute(&mut **tx)
-        .await?;
+        let (salt, send) = match live {
+            Some((salt, due)) => (salt, due),
+            None => {
+                let salt = random_salt()?.to_vec();
+                sqlx::query(
+                    "INSERT INTO signup_codes (email, salt, expires_at, mailed_at, wrong_guesses)
+                     VALUES ($1, $2, now() + make_interval(mins => $3), now(), 0)
+                     ON CONFLICT (email) DO UPDATE
+                     SET salt = $2, expires_at = now() + make_interval(mins => $3),
+                         mailed_at = now(), wrong_guesses = 0",
+                )
+                .bind(email)
+                .bind(&salt)
+                .bind(SIGNUP_MINUTES)
+                .execute(&mut **tx)
+                .await?;
+                (salt, true)
+            }
+        };
+        self.step("mail");
+        if send {
+            sqlx::query("UPDATE signup_codes SET mailed_at = now() WHERE email = $1")
+                .bind(email)
+                .execute(&mut **tx)
+                .await?;
+            if account.is_some() {
+                self.queue_notice(tx, email, account).await?;
+            } else {
+                let code = self.signup_code("signup-code", email, &salt);
+                self.queue_code(tx, for_id, email, code).await?;
+            }
+        }
         Ok(())
     }
 
-    /// The sign-up id to answer. A real sign-up when the address is free and has fewer than five;
-    /// otherwise a decoy row; past ten rows, an id that belongs to nobody. Whatever happens, the
-    /// caller answers the same.
+    /// The sign-up id to answer. Whatever the address's state and whatever the limits said, the
+    /// caller answers the same: a row is stored (a decoy if the address has an account) and the
+    /// address's code is mailed if it is time.
     pub(super) async fn start_signup(
         &self,
-        plan: &StartPlan,
+        client: &Client,
         email: &str,
         password_file: &[u8],
         device: &NewDevice,
         name: &str,
         invite_id: Option<Uuid>,
     ) -> Result<Uuid> {
+        let prefix = self.ip_prefix_digest(client);
         let mut tx = self.pool.begin().await?;
+        self.step("lock");
         Self::lock_address(&mut tx, email).await?;
-        let taken: Option<i32> = sqlx::query_scalar("SELECT 1 FROM accounts WHERE email = $1")
+        let account: Option<Uuid> = sqlx::query_scalar("SELECT id FROM accounts WHERE email = $1")
             .bind(email)
             .fetch_optional(&mut *tx)
             .await?;
-        let taken = taken.is_some() || plan.taken;
         sqlx::query("DELETE FROM pending_signups WHERE email = $1 AND expires_at <= now()")
             .bind(email)
             .execute(&mut *tx)
             .await?;
-        let (rows, real): (i64, i64) = sqlx::query_as(
-            "SELECT count(*), count(*) FILTER (WHERE NOT decoy)
-             FROM pending_signups WHERE email = $1",
+        let id = Uuid::new_v4();
+        self.code_step(&mut tx, email, account, id).await?;
+        // Room for this row: the newest rows of this prefix, then of the address, stay.
+        self.step("evict");
+        sqlx::query(
+            "DELETE FROM pending_signups WHERE id IN (
+                 SELECT id FROM pending_signups WHERE email = $1 AND prefix_digest = $2
+                 ORDER BY created_at DESC, id OFFSET $3)",
         )
         .bind(email)
-        .fetch_one(&mut *tx)
+        .bind(prefix.as_slice())
+        .bind(MAX_ROWS_PER_PREFIX - 1)
+        .execute(&mut *tx)
         .await?;
-        let id = Uuid::new_v4();
-        let mut sent = Sent::Nothing;
-        if rows < MAX_ROWS_PER_ADDRESS {
-            if taken || real >= MAX_REAL_PER_ADDRESS {
-                let digest = random_digest()?;
-                self.insert_row(
-                    &mut tx,
-                    id,
-                    email,
-                    true,
-                    password_file,
-                    device,
-                    name,
-                    &digest,
-                    invite_id,
-                )
-                .await?;
-                if taken && plan.notice {
-                    self.queue_notice(&mut tx, email).await?;
-                    sent = Sent::Notice;
-                }
-            } else if plan.hour && plan.day {
-                // A code mail goes out: a new code for every real sign-up of the address.
-                let code = new_code()?;
-                let digest = self.code_digest(email, &code);
-                sqlx::query(
-                    "UPDATE pending_signups SET code_digest = $2
-                     WHERE email = $1 AND NOT decoy AND expires_at > now()",
-                )
-                .bind(email)
-                .bind(digest.as_slice())
-                .execute(&mut *tx)
-                .await?;
-                self.insert_row(
-                    &mut tx,
-                    id,
-                    email,
-                    false,
-                    password_file,
-                    device,
-                    name,
-                    &digest,
-                    invite_id,
-                )
-                .await?;
-                self.queue_code(&mut tx, id, email, code).await?;
-                sent = Sent::Code;
-            } else {
-                // The caps refuse a mail. The sign-up still exists and takes the address's active
-                // code, if it has one, which is the one its owner already holds.
-                let active: Option<Vec<u8>> = sqlx::query_scalar(
-                    "SELECT code_digest FROM pending_signups
-                     WHERE email = $1 AND NOT decoy ORDER BY created_at DESC LIMIT 1",
-                )
-                .bind(email)
-                .fetch_optional(&mut *tx)
-                .await?;
-                let digest: [u8; 32] = match active {
-                    Some(d) => d.try_into().map_err(|_| AccountError::Internal)?,
-                    None => random_digest()?,
-                };
-                self.insert_row(
-                    &mut tx,
-                    id,
-                    email,
-                    false,
-                    password_file,
-                    device,
-                    name,
-                    &digest,
-                    invite_id,
-                )
-                .await?;
-            }
-        }
+        sqlx::query(
+            "DELETE FROM pending_signups WHERE id IN (
+                 SELECT id FROM pending_signups WHERE email = $1
+                 ORDER BY created_at DESC, id OFFSET $2)",
+        )
+        .bind(email)
+        .bind(MAX_ROWS_PER_ADDRESS - 1)
+        .execute(&mut *tx)
+        .await?;
+        self.step("insert");
+        sqlx::query(
+            "INSERT INTO pending_signups
+                 (id, email, decoy, password_file, device_name, device_platform,
+                  device_signing_key, device_agreement_key, expires_at, invite_id, prefix_digest)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now() + make_interval(mins => $9), $10, $11)",
+        )
+        .bind(id)
+        .bind(email)
+        .bind(account.is_some())
+        .bind(password_file)
+        .bind(name)
+        .bind(device.platform.as_str())
+        .bind(device.keys.signing.as_slice())
+        .bind(device.keys.agreement.as_slice())
+        .bind(SIGNUP_MINUTES)
+        .bind(invite_id)
+        .bind(prefix.as_slice())
+        .execute(&mut *tx)
+        .await?;
+        self.step("commit");
         tx.commit().await?;
-        self.settle_start(email, plan, sent).await?;
         Ok(id)
     }
 
     /// Tells the owner of an address that someone tried to sign up with it, and when. The time and
     /// the sign-in link travel only in the sealed queue entry, like a code, and nothing about who
     /// tried. Without an account URL there is no link, and the email has no button.
-    async fn queue_notice(&self, tx: &mut Transaction<'_, Postgres>, email: &str) -> Result<()> {
-        let account: Option<Uuid> = sqlx::query_scalar("SELECT id FROM accounts WHERE email = $1")
-            .bind(email)
-            .fetch_optional(&mut **tx)
-            .await?;
+    async fn queue_notice(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        email: &str,
+        account: Option<Uuid>,
+    ) -> Result<()> {
         let attempted = chrono::DateTime::from_timestamp(i64::try_from(self.now()).unwrap_or(0), 0)
             .unwrap_or_default();
         let link = self
@@ -384,9 +338,21 @@ impl Accounts {
     /// Proves the address with the code sent to it: creates the account for the sign-up named,
     /// from its own password record and device, trusts that device and signs it in, and deletes
     /// every other row of the address. Every failure, for any id, real or decoy, is
-    /// `invalid_email_code`: a wrong code, a decoy, a closed or expired sign-up, and a refusal by a
-    /// limit. A real sign-up and a decoy take the same steps.
+    /// `invalid_email_code`: a wrong code, a decoy, a closed or expired sign-up, a dead code and a
+    /// refusal by a limit. A real sign-up and a decoy take the same steps.
     pub async fn email_verify(
+        &self,
+        client: &Client,
+        signup_id: Uuid,
+        code: &str,
+    ) -> Result<NewSession> {
+        let started = std::time::Instant::now();
+        let result = self.email_verify_inner(client, signup_id, code).await;
+        self.pad(started).await;
+        result
+    }
+
+    async fn email_verify_inner(
         &self,
         client: &Client,
         signup_id: Uuid,
@@ -419,22 +385,29 @@ impl Accounts {
         code: &str,
     ) -> Result<NewSession> {
         self.step("row-read");
-        let row: Option<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT email, code_digest FROM pending_signups WHERE id = $1 AND expires_at > now()",
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT email FROM pending_signups WHERE id = $1 AND expires_at > now()",
         )
         .bind(signup_id)
         .fetch_optional(&self.pool)
         .await?;
-        let (email, stored) = row.ok_or(AccountError::InvalidEmailCode)?;
-        // Guesses at one code: from one IP prefix, and from all of them. A decoy has a code of its
-        // own (random), so it takes the same limiter slots.
+        let (email,) = row.ok_or(AccountError::InvalidEmailCode)?;
+        // The address's code record: a decoy's address has one too.
+        self.step("code-read");
+        let salt: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT salt FROM signup_codes WHERE email = $1 AND expires_at > now()",
+        )
+        .bind(&email)
+        .fetch_optional(&self.pool)
+        .await?;
+        let salt = salt.ok_or(AccountError::InvalidEmailCode)?;
+        // Guesses from one IP prefix at this code. The code's total is its own counter, below.
         self.step("code-limits");
         let prefix_subject = {
-            let mut data = stored.clone();
+            let mut data = salt.clone();
             data.extend_from_slice(&self.ip_prefix_digest(client));
             self.secrets.digest("email-code-guess-prefix", &data)
         };
-        let code_subject = self.secrets.digest("email-code-guess", &stored);
         let by_prefix = limits::allow(
             &self.pool,
             "email-code-guess-prefix",
@@ -442,19 +415,11 @@ impl Accounts {
             self.limits.email_code_guess_per_prefix,
         )
         .await?;
-        let by_code = limits::allow(
-            &self.pool,
-            "email-code-guess",
-            &code_subject,
-            self.limits.email_code_guess_per_code,
-        )
-        .await?;
-        if !(by_prefix && by_code) {
+        if !by_prefix {
             return Err(AccountError::InvalidEmailCode);
         }
         let session = self.verify_locked(client, signup_id, &email, code).await?;
         limits::give_back(&self.pool, "email-code-guess-prefix", &prefix_subject).await?;
-        limits::give_back(&self.pool, "email-code-guess", &code_subject).await?;
         Ok(session)
     }
 
@@ -476,7 +441,6 @@ impl Accounts {
             String,
             Vec<u8>,
             Vec<u8>,
-            Vec<u8>,
             Option<Uuid>,
         );
         // Read again under the row's lock: two verifications of one sign-up take turns, and the
@@ -484,30 +448,54 @@ impl Accounts {
         self.step("row-lock");
         let row: Option<Row> = sqlx::query_as(
             "SELECT email, decoy, password_file, device_name, device_platform,
-                    device_signing_key, device_agreement_key, code_digest, invite_id
+                    device_signing_key, device_agreement_key, invite_id
              FROM pending_signups WHERE id = $1 AND expires_at > now() FOR UPDATE",
         )
         .bind(signup_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let (email, decoy, password_file, name, platform, signing, agreement, digest, invite_id) =
+        let (email, decoy, password_file, name, platform, signing, agreement, invite_id) =
             row.ok_or(AccountError::InvalidEmailCode)?;
+        self.step("code-lock");
+        let record: Option<(Vec<u8>, i32)> = sqlx::query_as(
+            "SELECT salt, wrong_guesses FROM signup_codes
+             WHERE email = $1 AND expires_at > now() FOR UPDATE",
+        )
+        .bind(&email)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let (salt, wrong) = record.ok_or(AccountError::InvalidEmailCode)?;
         let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
         self.step("compare");
-        let right: bool = digest
-            .as_slice()
-            .ct_eq(self.code_digest(&email, &code).as_slice())
+        // A decoy compares against a code that was never mailed; a dead code (10 wrong guesses
+        // in its life) matches nothing. All three take this same comparison.
+        let label = if decoy {
+            "signup-decoy-code"
+        } else {
+            "signup-code"
+        };
+        let matches: bool = self
+            .signup_code(label, &email, &salt)
+            .as_bytes()
+            .ct_eq(code.as_bytes())
             .into();
-        if !right || decoy {
+        let right = matches && !decoy && wrong < MAX_WRONG_PER_CODE;
+        if !right {
             self.step("update");
-            sqlx::query("UPDATE pending_signups SET attempts = attempts + 1 WHERE id = $1")
-                .bind(signup_id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE signup_codes SET wrong_guesses = wrong_guesses + 1 WHERE email = $1",
+            )
+            .bind(&email)
+            .execute(&mut *tx)
+            .await?;
             self.step("commit");
             tx.commit().await?;
             return Err(AccountError::InvalidEmailCode);
         }
+        sqlx::query("DELETE FROM signup_codes WHERE email = $1")
+            .bind(&email)
+            .execute(&mut *tx)
+            .await?;
         // The first verified sign-up wins, and only the one named: the address's other rows go.
         sqlx::query("DELETE FROM pending_signups WHERE email = $1")
             .bind(&email)
@@ -573,11 +561,19 @@ impl Accounts {
         Ok(session)
     }
 
-    /// Sends a new code for the address of a pending sign-up, at most three an hour per sign-up id
-    /// and within the address's code mail caps (the same 5 an hour and 10 a day as a start). A mail
-    /// the caps refuse is simply not sent. A real sign-up and a decoy take the same steps and
-    /// answer the same; an id nobody made answers the same too.
+    /// Sends the address's code again for a pending sign-up, at most three an hour per sign-up id.
+    /// It is the same step a start takes: the active code is mailed again if the last mail is a
+    /// minute old, and a new code is made only if the active one has expired or died; a taken
+    /// address gets its notice instead. A real sign-up and a decoy take the same steps and answer
+    /// the same; an id nobody made answers the same too.
     pub async fn email_resend(&self, signup_id: Uuid) -> Result<()> {
+        let started = std::time::Instant::now();
+        let result = self.email_resend_inner(signup_id).await;
+        self.pad(started).await;
+        result
+    }
+
+    async fn email_resend_inner(&self, signup_id: Uuid) -> Result<()> {
         self.step("resend-limit");
         let subject = self.secrets.digest("email-resend", signup_id.as_bytes());
         if !limits::allow(
@@ -591,18 +587,15 @@ impl Accounts {
             return Err(AccountError::TooManyAttempts);
         }
         self.step("row-read");
-        let row: Option<(String, bool)> = sqlx::query_as(
-            "SELECT email, decoy FROM pending_signups WHERE id = $1 AND expires_at > now()",
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT email FROM pending_signups WHERE id = $1 AND expires_at > now()",
         )
         .bind(signup_id)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((email, decoy)) = row else {
+        let Some((email,)) = row else {
             return Ok(());
         };
-        // A decoy takes the slots too, and gives them back: it sends nothing.
-        self.step("code-cap");
-        let (hour, day) = self.take_code_mail_slots(&email).await?;
         let mut tx = self.pool.begin().await?;
         self.step("lock");
         Self::lock_address(&mut tx, &email).await?;
@@ -613,30 +606,31 @@ impl Accounts {
         .bind(signup_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let mut sent = false;
         if live.is_some() {
-            self.step("update");
-            if !decoy && hour && day {
-                self.rotate_and_mail(&mut tx, &email, signup_id).await?;
-                sent = true;
-            } else if decoy {
-                sqlx::query("UPDATE pending_signups SET code_digest = $2 WHERE id = $1")
-                    .bind(signup_id)
-                    .bind(random_digest()?.as_slice())
-                    .execute(&mut *tx)
+            let account: Option<Uuid> =
+                sqlx::query_scalar("SELECT id FROM accounts WHERE email = $1")
+                    .bind(&email)
+                    .fetch_optional(&mut *tx)
                     .await?;
-            } else {
-                sqlx::query("UPDATE pending_signups SET code_digest = code_digest WHERE id = $1")
-                    .bind(signup_id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
+            self.code_step(&mut tx, &email, account, signup_id).await?;
         }
         self.step("commit");
         tx.commit().await?;
-        if !sent {
-            self.give_back_code_mail_slots(&email, hour, day).await?;
-        }
         Ok(())
     }
+}
+
+fn orbyn_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex32(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.is_ascii() {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
 }

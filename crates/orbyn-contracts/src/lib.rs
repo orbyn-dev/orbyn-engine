@@ -104,6 +104,34 @@ pub struct RegisterFinish {
     #[serde(default)]
     #[ts(optional)]
     pub invite: Option<String>,
+    /// A proof of work, when the server asked for one (428 `proof_required`, see
+    /// [`ProofRequired`]). Sent with the same request again.
+    #[serde(default)]
+    #[ts(optional)]
+    pub proof: Option<SignupProof>,
+}
+
+/// The solution to a [`ProofRequired`] challenge: a `nonce` such that
+/// `SHA-256("orbyn/signup-pow/v1" || challenge || nonce as 4 bytes big endian)` begins with `bits`
+/// zero bits (`orbyn_crypto::pow::solve`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SignupProof {
+    /// The challenge as the server sent it, 64 hex digits.
+    pub challenge: String,
+    pub nonce: u32,
+}
+
+/// The body of 428 `proof_required`: this client address has used its free sign-up starts. Solve
+/// the challenge and send `register/finish` again with the proof. A solution buys one start and
+/// the challenge is good for 10 to 20 minutes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProofRequired {
+    pub code: String,
+    pub message: String,
+    pub challenge: String,
+    pub bits: u32,
 }
 
 /// `POST /v1/invites/check`: whether an invite code could be used to sign up now, before the
