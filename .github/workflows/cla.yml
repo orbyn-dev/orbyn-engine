@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   cla:
-    uses: orbyn-dev/.github/.github/workflows/cla.yml@a70850135c585813bb4e4328e8d8bbe7be7e9bbb
+    uses: orbyn-dev/.github/.github/workflows/cla.yml@59d7fc7d24c490fd855c424de192638ee7e35d4d
     with:
       agreement-version: "0.1"
     secrets:
