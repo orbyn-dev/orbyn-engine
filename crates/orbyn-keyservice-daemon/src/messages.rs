@@ -1,5 +1,5 @@
 //! Everything `orbyn-keyservice` says to an operator, word for word as designed (Account Designs
-//! v51, "Key service", orbyn-designs#45). Errors are `error: <what>` and an indented hint, on stderr, exit status 1;
+//! v51, "Key service", orbyn-designs#45; the public API's settings are v61, orbyn-designs#91). Errors are `error: <what>` and an indented hint, on stderr, exit status 1;
 //! the help and the `init` success line go to stdout. **No setting's value is ever printed** (a
 //! database address, a PIN): messages name the setting, never its value. The two things shown
 //! that are not settings are a role's name and the address the service could not listen on.
@@ -48,7 +48,8 @@ Public API settings:
 
   ORBYN_KS_PUBLIC_BIND                   Address for the public API (host:port). Without it there is no public API.
   ORBYN_KS_ALLOWED_ORIGINS               Origins the planner may call from, exact match, separated by commas. No wildcard.
-  ORBYN_KS_CLIENT_IP_HEADER              Header your ingress sets with the client address, for example cf-connecting-ip. Trusted only when set.
+  ORBYN_KS_CLIENT_IP_HEADER              Header your ingress sets with the client address, for example cf-connecting-ip.
+                                         Trusted only when set.
 ";
 
 /// The reload signal's log lines. Written by `tracing`, never to stderr.
@@ -214,8 +215,8 @@ pub fn bind_invalid() -> String {
     )
 }
 
-// The public API's settings (ks-serve, ks-help-settings), as the designer wrote them for the
-// public API.
+// The public API's settings, word for word from Account Designs v61 (orbyn-designs#91; frames
+// ks-serve and ks-help-settings).
 pub fn public_bind_invalid() -> String {
     error(
         "ORBYN_KS_PUBLIC_BIND is not a valid address",
