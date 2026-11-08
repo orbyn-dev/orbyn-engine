@@ -14,6 +14,7 @@ chrono.workspace = true
 orbyn-contracts.workspace = true
 orbyn-core.workspace = true
 orbyn-crypto.workspace = true
+orbyn-keyservice-client.workspace = true
 orbyn-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true

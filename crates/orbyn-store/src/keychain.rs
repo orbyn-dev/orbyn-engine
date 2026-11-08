@@ -59,7 +59,21 @@ impl Store {
     /// envelope may be addressed to the sender. All or nothing; an envelope for
     /// the same recipient, zone and key id replaces the earlier one.
     pub async fn put_envelopes(&self, session: &Session, envelopes: &[NewEnvelope]) -> Result<()> {
-        if envelopes.is_empty() || envelopes.len() > self.limits.max_envelope_batch {
+        self.put_envelope_batch(session, envelopes, &[]).await
+    }
+
+    /// Stores device envelopes and service envelopes in **one** transaction: all of them or none.
+    /// Either list may be empty, not both; together they hold at most `max_envelope_batch`. The
+    /// service envelopes are checked as [`Store::put_service_envelopes`] checks them.
+    pub async fn put_envelope_batch(
+        &self,
+        session: &Session,
+        envelopes: &[NewEnvelope],
+        service: &[crate::NewServiceEnvelope],
+    ) -> Result<()> {
+        if envelopes.len() + service.len() == 0
+            || envelopes.len() + service.len() > self.limits.max_envelope_batch
+        {
             return Err(StoreError::BatchTooLarge);
         }
         let mut seen = BTreeSet::new();
@@ -79,6 +93,7 @@ impl Store {
                 return Err(StoreError::InvalidEnvelope);
             }
         }
+        self.check_service_envelopes(service)?;
         let mut tx = self.pool.begin().await?;
         // The account first, then devices: the order removing a device uses, so
         // the two never deadlock. It also serializes envelope uploads per
@@ -151,6 +166,10 @@ impl Store {
             if count > self.limits.max_envelopes_per_device {
                 return Err(StoreError::TooManyEnvelopes);
             }
+        }
+        if !service.is_empty() {
+            self.write_service_envelopes(&mut tx, session, service)
+                .await?;
         }
         tx.commit().await?;
         Ok(())

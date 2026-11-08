@@ -120,6 +120,8 @@ pub struct Limits {
     /// none). A setting costs a few hundred bytes, so there is no cap on the chain itself.
     pub protection_per_hour: Limit,
     pub protection_per_day: Limit,
+    /// Asks to the key service for an account's service key, 10 an hour, counted per account.
+    pub service_key_asks_per_hour: Limit,
 }
 
 impl Limits {
@@ -161,6 +163,7 @@ impl Default for Limits {
             max_sockets_per_account: 16,
             protection_per_hour: Limit::new(10, Duration::from_secs(60 * 60)),
             protection_per_day: Limit::new(50, Duration::from_secs(24 * 60 * 60)),
+            service_key_asks_per_hour: Limit::new(10, Duration::from_secs(60 * 60)),
         }
     }
 }
@@ -221,6 +224,9 @@ pub enum StoreError {
     /// A service envelope was sent before the server holds the account's service key.
     #[error("the account has no service key yet")]
     NoServiceKey,
+    /// The account asked the key service for its key more than ten times in an hour.
+    #[error("too many requests for the service key; try again later")]
+    TooManyServiceKeyAsks,
     #[error("a protection setting is not valid")]
     InvalidProtection,
     /// The signature does not verify under the session device's key, or is not from the last

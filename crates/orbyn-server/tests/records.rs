@@ -14,7 +14,8 @@ use orbyn_auth_client as auth;
 use orbyn_core::accounts::AuthSecrets;
 use orbyn_core::{Accounts, Database};
 use orbyn_crypto::{DeviceKeys, DevicePublic};
-use orbyn_server::{AppState, Readiness, router};
+use orbyn_keyservice_client::{ClientError, ServiceKeyAnswer};
+use orbyn_server::{AppState, Readiness, ServiceKeySource, router};
 use orbyn_store::{Hub, Store};
 use serde_json::{Value, json};
 use std::future::Future;
@@ -71,6 +72,15 @@ async fn server() -> Server {
 
 /// A replica whose `/v1/sync` pings every `keepalive`, when given.
 async fn server_with(keepalive: Option<Duration>) -> Server {
+    build(keepalive, None).await
+}
+
+/// A replica whose key service is `source`.
+async fn server_ks(source: Arc<dyn ServiceKeySource>) -> Server {
+    build(None, Some(source)).await
+}
+
+async fn build(keepalive: Option<Duration>, source: Option<Arc<dyn ServiceKeySource>>) -> Server {
     let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL to run the Postgres tests");
     let db = Database::connect(&url).await.expect("connect to Postgres");
     db.migrate().await.expect("migrate");
@@ -85,6 +95,9 @@ async fn server_with(keepalive: Option<Duration>) -> Server {
         .with_store(store);
     if let Some(interval) = keepalive {
         state = state.with_sync_keepalive(interval);
+    }
+    if let Some(source) = source {
+        state = state.with_key_service(source);
     }
     let b = Uuid::new_v4().into_bytes();
     Server {
@@ -854,4 +867,376 @@ async fn a_key_rotation_waits_while_the_accounts_deletion_is_scheduled() {
     );
     schedule(false).await.expect("cancel");
     assert_eq!(put(true).await.0, StatusCode::NO_CONTENT);
+}
+
+/// What the stand-in key service does next.
+#[derive(Clone, Copy, PartialEq)]
+enum Say {
+    /// A good answer, the log holding the entry.
+    Good,
+    /// A good answer, no published head holds the entry yet.
+    NotInLog,
+    Down,
+    Retired,
+    /// An answer for another account.
+    OtherAccount,
+    /// A statement hash that is not the statement's.
+    WrongHash,
+}
+
+/// A key service that answers from a script and counts its calls. The key is one fixed P-256 key.
+struct FakeKeyService {
+    say: std::sync::Mutex<Say>,
+    key: orbyn_crypto::P256Keys,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FakeKeyService {
+    fn new(say: Say) -> Arc<Self> {
+        Arc::new(Self {
+            say: std::sync::Mutex::new(say),
+            key: orbyn_crypto::P256Keys::generate().expect("key"),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn set(&self, say: Say) {
+        *self.say.lock().expect("lock") = say;
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn answer(&self, account: [u8; 16], covered: Option<bool>) -> ServiceKeyAnswer {
+        let say = *self.say.lock().expect("lock");
+        let public = self.key.public();
+        let statement = orbyn_crypto::service_key_statement(1, &account, &public);
+        let mut hash = orbyn_crypto::service_key_statement_hash(&statement);
+        if say == Say::WrongHash {
+            hash[0] ^= 1;
+        }
+        let shown = if say == Say::OtherAccount {
+            [9; 16]
+        } else {
+            account
+        };
+        ServiceKeyAnswer {
+            account_id: orbyn_keyservice_client::hex(&shown),
+            identity_version: 1,
+            public_key: orbyn_keyservice_client::hex(public.compressed()),
+            statement_hash: orbyn_keyservice_client::hex(&hash),
+            signature: orbyn_keyservice_client::hex(&[5; 64]),
+            entry_index: 41,
+            head_covers_entry: covered,
+        }
+    }
+
+    fn refusal(&self) -> Option<ClientError> {
+        match *self.say.lock().expect("lock") {
+            Say::Down => Some(ClientError::Unavailable),
+            Say::Retired => Some(ClientError::Retired),
+            _ => None,
+        }
+    }
+}
+
+impl ServiceKeySource for FakeKeyService {
+    fn create_or_get(
+        &self,
+        account: [u8; 16],
+    ) -> Pin<Box<dyn Future<Output = Result<ServiceKeyAnswer, ClientError>> + Send + '_>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            match self.refusal() {
+                Some(e) => Err(e),
+                None => Ok(self.answer(account, None)),
+            }
+        })
+    }
+
+    fn get(
+        &self,
+        account: [u8; 16],
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ServiceKeyAnswer>, ClientError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            match self.refusal() {
+                Some(e) => Err(e),
+                None => {
+                    let covered = *self.say.lock().expect("lock") != Say::NotInLog;
+                    Ok(Some(self.answer(account, Some(covered))))
+                }
+            }
+        })
+    }
+}
+
+/// The statement hash the fake certifies for the account behind `token`, as the route answers it.
+fn hash_in(certification: &Value) -> String {
+    certification["statement_hash"]
+        .as_str()
+        .expect("hash")
+        .to_owned()
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_service_key_route_certifies_once_and_says_when_the_log_is_behind() {
+    // No key service configured: nothing is escrowed.
+    let bare = server().await;
+    let (_, token) = bare.sign_up().await;
+    let (status, body) = bare
+        .call(Method::GET, "/v1/keychain/service-key", Some(&token), None)
+        .await;
+    assert_eq!(
+        (status, &body["code"]),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            &json!("key_service_unavailable")
+        )
+    );
+
+    let fake = FakeKeyService::new(Say::NotInLog);
+    let server = server_ks(fake.clone()).await;
+    let (_, token) = server.sign_up().await;
+    let ask = || server.call(Method::GET, "/v1/keychain/service-key", Some(&token), None);
+    // The key exists, the log does not hold it yet: 202, and the certification is kept anyway.
+    let (status, body) = ask().await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::ACCEPTED, &json!("service_key_pending"))
+    );
+    fake.set(Say::Good);
+    let (status, body) = ask().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["identity_version"], 1);
+    assert_eq!(body["entry_index"], 41);
+    assert_eq!(unb64(&body["public_key"]).len(), 33);
+    assert_eq!(unb64(&body["statement_hash"]).len(), 32);
+    assert_eq!(unb64(&body["signature"]), vec![5; 64]);
+    // The same key, the same certification, on every ask.
+    let (_, again) = ask().await;
+    assert_eq!(body, again);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_service_key_route_refuses_what_the_key_service_cannot_stand_behind() {
+    let fake = FakeKeyService::new(Say::Down);
+    let server = server_ks(fake.clone()).await;
+    let (email, token) = server.sign_up().await;
+    for (say, status, code) in [
+        (
+            Say::Down,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "key_service_unavailable",
+        ),
+        (Say::Retired, StatusCode::CONFLICT, "service_key_retired"),
+        (
+            Say::OtherAccount,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "key_service_unavailable",
+        ),
+        (
+            Say::WrongHash,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "key_service_unavailable",
+        ),
+    ] {
+        fake.set(say);
+        let (got, body) = ask_key(&server, &token).await;
+        assert_eq!((got, &body["code"]), (status, &json!(code)));
+    }
+    // Nothing from a bad answer was kept: no envelope can name a certification.
+    fake.set(Say::Good);
+    let (phone_token, phone) = server.sign_in_new_device(&email).await;
+    let before = fake.calls();
+    // A device the owner has not approved does not make the key service work.
+    let (status, body) = ask_key(&server, &phone_token).await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::FORBIDDEN, &json!("device_not_trusted"))
+    );
+    assert_eq!(fake.calls(), before);
+    server.trust(phone).await;
+    assert_eq!(ask_key(&server, &phone_token).await.0, StatusCode::OK);
+    // No token at all.
+    assert_eq!(
+        server
+            .call(Method::GET, "/v1/keychain/service-key", None, None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn asking_for_the_service_key_is_limited_per_account_before_the_key_service_is_called() {
+    let fake = FakeKeyService::new(Say::Good);
+    let server = server_ks(fake.clone()).await;
+    let (_, token) = server.sign_up().await;
+    let (_, other) = server.sign_up().await;
+    for _ in 0..10 {
+        let (status, body) = server
+            .call(Method::GET, "/v1/keychain/service-key", Some(&token), None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, body) = server
+        .call(Method::GET, "/v1/keychain/service-key", Some(&token), None)
+        .await;
+    assert_eq!(
+        (status, &body["code"]),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            &json!("too_many_service_key_requests")
+        )
+    );
+    // The eleventh ask never reached the key service.
+    assert_eq!(fake.calls(), 10);
+    // Another account is not in the way.
+    assert_eq!(
+        server
+            .call(Method::GET, "/v1/keychain/service-key", Some(&other), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn service_envelopes_go_in_the_envelope_batch_and_empty_the_missing_list() {
+    let fake = FakeKeyService::new(Say::Good);
+    let server = server_ks(fake.clone()).await;
+    let (email, token) = server.sign_up().await;
+    let (_, phone) = server.sign_in_new_device(&email).await;
+    server.trust(phone).await;
+    let key_id = b64(&[3; 16]);
+    let device_envelope = |zone: &str| {
+        json!({
+            "recipient_device_id": phone,
+            "zone": zone,
+            "key_id": key_id,
+            "envelope": b64(&[7; 60]),
+        })
+    };
+    let service_envelope = |zone: &str, hash: &str| json!({"zone": zone, "key_id": key_id, "envelope": b64(&[8; 90]), "statement_hash": hash});
+    let post = |body: Value| {
+        server.call(
+            Method::POST,
+            "/v1/keychain/envelopes",
+            Some(&token),
+            Some(body),
+        )
+    };
+    let missing = || {
+        server.call(
+            Method::GET,
+            "/v1/keychain/service-missing",
+            Some(&token),
+            None,
+        )
+    };
+
+    // Before the server holds a certification nothing can be sealed to it.
+    let (status, body) = post(json!({
+        "envelopes": [device_envelope("list:inbox")],
+        "service_envelopes": [service_envelope("list:inbox", &b64(&[1; 32]))],
+    }))
+    .await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::CONFLICT, &json!("service_key_missing"))
+    );
+    // The whole batch failed: the device envelope was not stored either.
+    let (status, listed) = missing().await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["keys"], json!([]));
+
+    let (_, certification) = server
+        .call(Method::GET, "/v1/keychain/service-key", Some(&token), None)
+        .await;
+    let hash = hash_in(&certification);
+
+    // A hash that is not the account's certification: 409, and again nothing is stored.
+    let (status, body) = post(json!({
+        "envelopes": [device_envelope("list:inbox")],
+        "service_envelopes": [service_envelope("list:inbox", &b64(&[1; 32]))],
+    }))
+    .await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::CONFLICT, &json!("service_key_changed"))
+    );
+    assert_eq!(missing().await.1["keys"], json!([]));
+    // A hash of the wrong length is a bad request.
+    let (status, _) = post(json!({
+        "envelopes": [],
+        "service_envelopes": [service_envelope("list:inbox", &b64(&[1; 31]))],
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Device envelopes for two zones; the service holds neither yet. The list is in zone order.
+    assert_eq!(
+        post(json!({"envelopes": [device_envelope("list:work"), device_envelope("list:inbox")]}))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, listed) = missing().await;
+    assert_eq!(
+        listed["keys"],
+        json!([
+            {"zone": "list:inbox", "key_id": key_id},
+            {"zone": "list:work", "key_id": key_id},
+        ])
+    );
+    // One service envelope, sent with nothing else, takes one zone off the list.
+    assert_eq!(
+        post(
+            json!({"envelopes": [], "service_envelopes": [service_envelope("list:inbox", &hash)]})
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        missing().await.1["keys"],
+        json!([{"zone": "list:work", "key_id": key_id}])
+    );
+    // The last one goes with a device envelope in one batch.
+    assert_eq!(
+        post(json!({
+            "envelopes": [device_envelope("list:work")],
+            "service_envelopes": [service_envelope("list:work", &hash)],
+        }))
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(missing().await.1["keys"], json!([]));
+    // A device that is not trusted is not told what the service lacks.
+    let (pending_phone, _) = server.sign_in_new_device(&email).await;
+    let (status, body) = server
+        .call(
+            Method::GET,
+            "/v1/keychain/service-missing",
+            Some(&pending_phone),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::FORBIDDEN, &json!("device_not_trusted"))
+    );
+}
+
+async fn ask_key(server: &Server, token: &str) -> (StatusCode, Value) {
+    server
+        .call(Method::GET, "/v1/keychain/service-key", Some(token), None)
+        .await
 }
