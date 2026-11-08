@@ -1,6 +1,6 @@
 # Standard account recovery: the contract
 
-**Design, not built.** It settles what [key-service.md](key-service.md) (Recovery, step 5 of *Order of work*) leaves open, against what is built since: the internal API, the public log API, service envelopes (8a to 8c), and the Advanced switch. Read key-service.md first; this note does not repeat the state machine, the 72-hour rule or the device trust rules, and changes them only where it says so. Questions that need a person are at the end.
+**Design, not built.** It settles what [key-service.md](key-service.md) (Recovery, step 5 of *Order of work*) leaves open, against what is built since: the internal API, the public log API, service envelopes (8a to 8c), and the Advanced switch. Read key-service.md first; this note does not repeat the state machine, the 72-hour rule or the device trust rules, and changes them only where it says so. Decisions made by Products Research for the owner are marked **Decided** and listed at the end; what is still open is marked **Open**.
 
 ## What is built, and what this adds
 
@@ -32,6 +32,7 @@ Start and email proof are internal calls too (`POST /internal/v1/recoveries` and
 
 - **Public API, new:** `POST /v1/recovery/cancel` on the key service's own hostname, not through the record server. The body is `orbyn/recovery-cancel/v1` over the account (as the map key), the recovery id and the time, signed by a device key. Entry kind 4.
 - **Whose cancel counts:** as key-service.md: the starting device, or any device key that signed a service envelope for the account. The key service has verified those senders' signatures, so it needs no device list from the record server. The record server could add a device of its own and so gain a cancel right; that only lets it block recoveries, which it can already do.
+- **Minimum device-trust age (Decided).** A device may cancel only if it has been trusted for at least **1 hour** at the recovery's start (measured at the start's witnessed time, not now), so a device added just before or during an attack cannot cancel. **The device that started the recovery may cancel its own**, whatever its age. **Open (mechanism):** the key service takes no device list from the record server, so it needs something it can check. Proposal: the cancel carries the device's approval record (the approver's signature and time from `orbyn/device-approval/v1`) and the key service checks it chains to a device that has signed a service envelope for the account and is at least an hour older than the start head's time. Nobody joins an account during a recovery anyway, so measuring at the start loses no honest cancel.
 - **Final:** `cancelled` never reverts. Accepted in `waiting_for_email`, `waiting` and `ready`; refused in `finishing` and `sealed` (`recovery_finishing`, `recovery_sealed`).
 - **Limits:** 10 per account an hour, counted after the signature checks; a bad signature costs the owner nothing.
 - **Cancel by email link** carries no right. The link opens the planner on a trusted device, which signs.
@@ -52,11 +53,14 @@ The email and screens for these are not designed. Every string marked TODO-desig
 
 ## The audit sink
 
-- **Today** the audit is a `tracing` line on the `audit` target for certification and retire. That stays for development.
-- **Recovery needs an off-machine sink** before it can ship: append-only storage outside the key service's hosts with a retention lock. Each record: event, map key, recovery id, device id (public key hash), the time, and the sink's own sequence. No keys, no codes, no emails.
-- **Events:** recovery start, email proven, cancel (and by which device), finish claimed, every open (count only, per recovery, not per zone), sealed, committed, cancelled by the key service (and why), every refused finish, identity and KEK rotation.
-- **Fail closed:** a start or finish whose audit record cannot be written is refused, like "no witness, no recovery". A recovery therefore needs the sink to be up at the start and again at the finish. A self-hoster without a sink has recovery off (503), the same as without a witness.
-- **Which provider is an open decision**, as is who holds the retention lock.
+**Decided** (needed before open sign-up, not for the invite beta).
+
+- **Where:** append-only object storage with a **compliance-mode retention lock**, in a **separate cloud account used for nothing else**, owned by Anh. S3 Object Lock is recommended; any store with the same lock is acceptable. The key service's writer role can create objects in the bucket and nothing else (no delete, no lock change, no read of other records); the people who run the servers hold no role on that account.
+- **The retention lock is held by Anh, never by whoever runs the servers.** Compliance mode means not even the account owner can shorten a retention period or delete a locked object, so the lock outlives a compromised operator. The retention period is set at bucket creation and is not shorter than the longest recovery and rotation history worth keeping (proposal: 7 years); a shorter one is a decision for Anh.
+- **Today** the audit is a `tracing` line on the `audit` target for certification and retire (`TracingAudit`). That stays for development and the invite beta. It is not an acceptable sink for recovery.
+- **What each record holds:** the event name; the account's **map key** (never the account id or the address); the recovery id; the device id as a hash of its public key; the time (the key service's clock, and the witnessed head time where one exists); the key service's identity version; a per-record sequence number and the hash of the previous record, so a deleted or reordered object shows as a gap in the chain. **No keys, no codes, no emails, no envelope bytes, no zone names.**
+- **Events:** recovery start, email proven, cancel (and the device that signed it), finish claimed, opens (a count per recovery, not one per zone), sealed, committed, cancelled by the key service (and why), every refused finish, identity and KEK rotation, certification and retire (as today).
+- **Fail closed:** a start or a finish whose audit record cannot be written (the sink is unreachable, the writer role is refused, or the chain does not continue from the last acknowledged object) is **refused**, and nothing is opened. A recovery therefore needs the sink at the start and again at the finish, as it needs a witness. A deployment without the sink has recovery off (503 `recovery_unavailable`), the invite beta included, until it is configured. A self-hoster may point it at their own store with the same lock; the guarantee then rests on who holds that lock.
 
 ## What an attacker with the email alone can and cannot do
 
@@ -78,16 +82,16 @@ The email and screens for these are not designed. Every string marked TODO-desig
 - **Cause mail to the owner** only through the existing per-address caps; this contract adds none that the mailbox holder can spend.
 - **If the owner later starts a recovery, read its code before the owner does.** Useless without the owner's session, but it means the owner's mailbox is part of the trust: that is why the second factor and the 72 hours exist.
 
-**The step up that does matter** is email plus password (the account has no second factor) or email plus password plus second factor. That person can start, prove, wait and finish, and if the owner has no trusted device left there is nobody to cancel. This is the accepted case in key-service.md ("an account with no second factor ... is recovered with its password and email alone, after the wait"). Two more consequences to decide, below: such a person can **block the owner's own recovery** (a second email-proven start answers `recovery_in_progress`) and **use up the 3 starts in 30 days**.
+**The step up that does matter** is email plus password (the account has no second factor) or email plus password plus second factor. That person can start, prove, wait and finish, and if the owner has no trusted device left there is nobody to cancel. This is the accepted case in key-service.md ("an account with no second factor ... is recovered with its password and email alone, after the wait"). Two consequences are **Decided**: such a person can **block the owner's own recovery** (a second email-proven start answers `recovery_in_progress`; nothing supersedes a waiting one), and can **use up the 3 starts in 30 days**, because a start that a trusted device cancelled still counts. **Plainly: an owner who then loses every device inside that window waits until it ends.** There is no way around it that would not also let an attacker with the password and the mailbox reset the limit by cancelling their own starts.
 
 ## Interactions with what is already built
 
 - **Account deletion scheduled:** a start and a finish answer 409 `deletion_scheduled`, like removing a device, because a finish removes devices and ends sessions (the deletion grace period already refuses those).
 - **Advanced:** a recovery for an Advanced account is refused (`recovery_unavailable`), since no copy exists. The signed setting decides, not a record-server flag. If the setting is Standard but the key service says the key is retired (Advanced then Standard without 8c-2), the answer is the same: **recovery needs 8c-2**.
-- **Password change (the #74 flow):** other sessions end on a change; a recovery finish does the same for the removed devices' sessions, and the recovered device must rotate every zone key before uploading, as key-service.md says.
+- **Password change (the #74 flow, see the password-change contract):** the same minimum device-trust age of 1 hour applies to a password change; other sessions end on a `change`; a recovery finish ends the removed devices' sessions too, and the recovered device must rotate every zone key before uploading, as key-service.md says.
 - **Protection chain:** a finish makes no setting. The recovered device pins the service recovery approval as its anchor and signs nothing about the level until it has verified the chain from a device it trusts.
 - **Log kinds:** start 3, cancel 4, finish 5 (key-service-4.md reserved 3 to 5 for recovery and the identity map; the identity map takes the next free numbers).
-- **Migrations:** key service store only: `recoveries` (id, account map key, device id and keys, state, started_head, email_proven_at, finished_at) with an append-only guard like `service_keys`; the record server gets a pointer row (`account_recoveries`: recovery id, device, state as last told) and the email proof code (a keyed digest, 8 characters, 30 minutes, 5 tries).
+- **Migrations:** key service store only: `recoveries` (id, account map key, device id and keys, state, started_head, email_proven_at, finished_at) with an append-only guard like `service_keys`; the record server gets a pointer row (`account_recoveries`: recovery id, device, state as last told) and the email proof code (**Decided:** the same 8 characters as sign-up, from the 30-symbol alphabet, shown grouped, 30 minutes, 5 tries; kept as a keyed digest, not derived).
 
 ## Tests the implementation must carry
 
@@ -99,13 +103,21 @@ The email and screens for these are not designed. Every string marked TODO-desig
 - An email-alone scenario test: with the mailbox but no session, no call changes any state.
 - The key service has no route that opens outside `finish`, listed by a test as in key-service-4.md.
 
-## Decisions needed
+## Decisions
 
-1. **Opening by pages from the record server (this note), or the key service holding its own copy of the service envelopes?** A copy would make recovery independent of the record server's database but doubles the places a backup can leak; recommended: pages.
-2. **The key service sends no email.** Confirm; the alternative is a mail sender with its own secret.
-3. **Audit sink:** provider and retention lock holder (an open decision since key-service.md). Without it recovery is off.
-4. **Recovery code format:** key-service.md says 6 digits; sign-up now uses 8 characters (Account Designs v62). Use the same 8 characters, 30 minutes, 5 tries? Designer.
-5. **A second email-proven start while one waits:** keep `recovery_in_progress` (owner cannot supersede an attacker who has the password and email), or let a start proven by a longer second-factor-only route supersede? Lead.
-6. **Burning the 3 starts in 30 days:** should a start that a trusted device cancelled not count? Lead.
-7. **Minimum device-trust age and an owner notice for new devices** (Anh, from #74): do they apply to who may cancel? A device trusted for under an hour cancelling is the thief's best move.
-8. **Order:** after 8d (verifier) and 8e (client wrapping and backfill), since a device that cannot verify the log cannot show the notice that makes the 72 hours mean anything.
+**Decided** (Products Research, for Anh):
+
+1. **The record server pages in the envelopes.** The key service keeps no copy of service envelopes.
+2. **The key service sends no email.**
+3. **Audit sink:** append-only object storage, compliance-mode retention lock, separate account used for nothing else, owned by Anh; S3 Object Lock recommended. The lock is Anh's, never the operators'. Fail closed. Needed before open sign-up, not for the invite beta. Detail above.
+4. **Recovery code:** 8 characters as in sign-up, 30 minutes, 5 tries.
+5. **A second email-proven start while one waits** keeps `recovery_in_progress`; nothing supersedes it.
+6. **A start a trusted device cancelled still counts** toward the 3 in 30 days. An owner who then loses every device within the window waits.
+7. **Minimum device-trust age of 1 hour** for who may cancel a recovery and for a password change. The device that started a recovery may cancel its own. An account's very first device is exempt for a password change. The owner is told of every password change.
+8. **Order:** after 8d (the client verifier) and 8e (client wrapping and backfill), since a device that cannot verify the log cannot show the notice that makes the 72 hours mean anything. This PR stays design-only until both land.
+
+**Open:**
+
+- How the key service checks a device's trust age without a device list (proposal under *The cancel route*).
+- Every string: the recovery notice, the start, reminder, finish and cancel emails, the banner, and the waiting screen (the designer, via the coordinator).
+- The retention period of the audit bucket (proposal: 7 years; Anh).
