@@ -657,6 +657,7 @@ impl Accounts {
     /// every address and every state of the limits: an address that is taken, has five pending
     /// sign-ups already, or is over its mail caps gets an id of the same shape that belongs to
     /// nobody.
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_finish(
         &self,
         client: &Client,
