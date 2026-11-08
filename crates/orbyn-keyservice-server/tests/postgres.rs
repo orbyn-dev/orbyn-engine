@@ -2164,3 +2164,265 @@ async fn a_head_is_published_only_when_it_is_told_so_and_cosignatures_are_kept_o
     }
     db.cleanup().await;
 }
+
+// ---- What the public API reads: only published state, in one snapshot ----
+
+use orbyn_translog::End;
+use orbyn_translog::merkle::{verify_consistency, verify_inclusion};
+
+#[tokio::test]
+#[ignore = "needs ORBYN_KEYSERVICE_DATABASE_URL"]
+async fn the_public_reads_serve_nothing_before_a_head_is_published_and_never_a_stored_one() {
+    let db = TestDb::new().await;
+    let store = db.store().await;
+    let key = [1u8; 32];
+    let first = entry(MapId::Service, 1, [0; 32], 0);
+    store.append(&first).await.expect("append");
+    // Nothing published: every read says so.
+    assert!(store.published_head().await.expect("read").is_none());
+    assert!(
+        store
+            .published_lookup(MapId::Service, &key)
+            .await
+            .expect("read")
+            .is_none()
+    );
+    assert!(
+        store
+            .published_chain(MapId::Service, &key, None, 100)
+            .await
+            .expect("read")
+            .is_none()
+    );
+    assert!(
+        store
+            .published_consistency(1, 1)
+            .await
+            .expect("read")
+            .is_none()
+    );
+    // A stored head with its cosignatures missing is still not public.
+    let head = store.build_head(10, 1, None).await.expect("head");
+    let id = store.commit_head(&head, &[1; 64]).await.expect("commit");
+    assert!(store.published_head().await.expect("read").is_none());
+    assert!(
+        store
+            .published_lookup(MapId::Service, &key)
+            .await
+            .expect("read")
+            .is_none()
+    );
+    store
+        .add_cosignature(id, &[7; 32], &[3; 104])
+        .await
+        .expect("cosign");
+    assert!(
+        store.published_head().await.expect("read").is_none(),
+        "cosigned is not published"
+    );
+    store.publish_head(id).await.expect("publish");
+    let served = store
+        .published_head()
+        .await
+        .expect("read")
+        .expect("published");
+    assert_eq!(served.stored.head, head);
+    assert_eq!(served.stored.log_signature, vec![1u8; 64]);
+    assert_eq!(served.cosignatures, vec![([7; 32], [3; 104])]);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "needs ORBYN_KEYSERVICE_DATABASE_URL"]
+async fn a_lookup_and_a_chain_are_proved_against_the_published_head_and_only_what_it_covers() {
+    let db = TestDb::new().await;
+    let store = db.store().await;
+    // Account 1 has a chain of three, account 2 one, in the service map; 5 entries in all.
+    let mut prev = [0u8; 32];
+    let mut chain_entries = Vec::new();
+    for i in 0..3u64 {
+        let e = entry(MapId::Service, 1, prev, i);
+        prev = store.append(&e).await.expect("append").entry_hash;
+        chain_entries.push(e);
+        if i == 0 {
+            store
+                .append(&entry(MapId::Service, 2, [0; 32], 10))
+                .await
+                .expect("append");
+        }
+    }
+    store
+        .append(&entry(MapId::Identity, 3, [0; 32], 11))
+        .await
+        .expect("append");
+    let head = store.build_head(10, 1, None).await.expect("head");
+    assert_eq!(head.size, 5);
+    let id = store.commit_head(&head, &[1; 64]).await.expect("commit");
+    store.publish_head(id).await.expect("publish");
+    // An entry appended after the published head is in no read.
+    let late = entry(MapId::Service, 1, prev, 99);
+    store.append(&late).await.expect("late");
+
+    let key = [1u8; 32];
+    let view = store
+        .published_lookup(MapId::Service, &key)
+        .await
+        .expect("lookup")
+        .expect("published");
+    assert_eq!(view.root, head.service_map_root);
+    let value = match verify(&view.root, &key, &view.proof).expect("a valid proof") {
+        Lookup::Present(value) => value,
+        Lookup::Absent => panic!("the account is in the map"),
+    };
+    let latest = view.latest.expect("the newest entry");
+    assert_eq!(latest.chain_index, 2, "the late entry is not there");
+    let latest_entry = Entry::decode(&latest.entry).expect("canonical");
+    assert_eq!(latest_entry, chain_entries[2]);
+    assert_eq!(
+        value,
+        map_value(&latest_entry.hash().expect("hash"), latest.chain_index + 1)
+    );
+    verify_inclusion(
+        &leaf_hash(&latest.entry),
+        latest.index,
+        head.size,
+        &latest.inclusion_proof,
+        &head.log_root,
+    )
+    .expect("the entry is in the log of the head");
+
+    // The whole chain, in pages of two: each entry proved, the late one absent, `next` set once.
+    let first = store
+        .published_chain(MapId::Service, &key, None, 2)
+        .await
+        .expect("page")
+        .expect("published");
+    assert_eq!(
+        first
+            .entries
+            .iter()
+            .map(|e| e.chain_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert_eq!(first.next, Some(1));
+    let second = store
+        .published_chain(MapId::Service, &key, first.next, 2)
+        .await
+        .expect("page")
+        .expect("published");
+    assert_eq!(
+        second
+            .entries
+            .iter()
+            .map(|e| e.chain_index)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert_eq!(second.next, None);
+    assert_eq!(second.head, first.head);
+    for e in first.entries.iter().chain(&second.entries) {
+        verify_inclusion(
+            &leaf_hash(&e.entry),
+            e.index,
+            head.size,
+            &e.inclusion_proof,
+            &head.log_root,
+        )
+        .expect("each entry is proved");
+    }
+
+    // An absent key: a valid absence proof, no entries; an unknown chain is an empty page.
+    let absent = [200u8; 32];
+    let view = store
+        .published_lookup(MapId::Service, &absent)
+        .await
+        .expect("lookup")
+        .expect("published");
+    assert_eq!(
+        verify(&view.root, &absent, &view.proof).expect("valid"),
+        Lookup::Absent
+    );
+    assert!(view.latest.is_none());
+    assert!(
+        matches!(view.proof.end, End::Leaf { .. }),
+        "a neighbour's leaf ends the walk"
+    );
+    let empty = store
+        .published_chain(MapId::Service, &absent, None, 100)
+        .await
+        .expect("page")
+        .expect("published");
+    assert!(empty.entries.is_empty() && empty.next.is_none());
+    // The identity map is its own: account 1 is not in it.
+    let identity = store
+        .published_lookup(MapId::Identity, &key)
+        .await
+        .expect("lookup")
+        .expect("published");
+    assert_eq!(
+        verify(&identity.root, &key, &identity.proof).expect("valid"),
+        Lookup::Absent
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "needs ORBYN_KEYSERVICE_DATABASE_URL"]
+async fn consistency_proofs_are_served_only_within_the_published_log() {
+    let db = TestDb::new().await;
+    let store = db.store().await;
+    let mut roots = vec![(0u64, orbyn_translog::merkle::empty_root())];
+    let mut leaves = Vec::new();
+    let mut prev_head = None;
+    for round in 0..3u64 {
+        for i in 0..4u64 {
+            let e = entry(
+                MapId::Service,
+                (round * 4 + i) as u8,
+                [0; 32],
+                round * 4 + i,
+            );
+            store.append(&e).await.expect("append");
+            leaves.push(leaf_hash(&e.encode().expect("encode")));
+        }
+        let head = store.build_head(10 + round, 1, None).await.expect("head");
+        let id = store.commit_head(&head, &[1; 64]).await.expect("commit");
+        store.publish_head(id).await.expect("publish");
+        roots.push((head.size, head.log_root));
+        prev_head = Some(head);
+    }
+    let published = prev_head.expect("a head");
+    assert_eq!(published.size, 12);
+    // A later entry and stored head that is not published: sizes past 12 are refused.
+    store
+        .append(&entry(MapId::Service, 100, [0; 32], 50))
+        .await
+        .expect("late");
+    let late = store.build_head(50, 1, None).await.expect("late head");
+    store
+        .commit_head(&late, &[1; 64])
+        .await
+        .expect("commit late");
+    for (from, to) in [(0, 4), (5, 4), (4, 13), (1, 13)] {
+        assert!(
+            matches!(
+                store.published_consistency(from, to).await,
+                Err(StoreError::BadHead)
+            ),
+            "{from}..{to}"
+        );
+    }
+    // Every pair of published sizes proves, and verifies.
+    for (i, (from, from_root)) in roots.iter().enumerate().skip(1) {
+        for (to, to_root) in roots.iter().skip(i) {
+            let proof = store
+                .published_consistency(*from, *to)
+                .await
+                .expect("read")
+                .expect("published");
+            verify_consistency(*from, *to, from_root, to_root, &proof).expect("consistent");
+        }
+    }
+    db.cleanup().await;
+}

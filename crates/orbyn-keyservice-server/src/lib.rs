@@ -23,11 +23,13 @@
 mod head;
 mod log;
 mod map;
+mod public;
 mod publish;
 mod service_keys;
 
 pub use head::StoredHead;
 pub use log::Appended;
+pub use public::{ChainEntry, ChainPage, LookupView, PAGE, PublishedHead};
 pub use publish::{CosignEntryData, CosignMaterial};
 pub use service_keys::{
     CreateError, NewServiceKey, ServiceKeyOutcome, ServiceKeyRecord, ServiceKeyState,
