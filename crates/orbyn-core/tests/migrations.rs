@@ -159,3 +159,129 @@ async fn paired_approvals_migrate_old_approvals_and_devices() {
 
     drop_database(admin, pool, &name).await;
 }
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn service_envelopes_leave_every_existing_envelope_a_device_envelope() {
+    let (admin, pool, name) = empty_database().await;
+    MIGRATOR.run_to(16, &pool).await.expect("0001 to 0016");
+
+    // An account with two devices and an envelope from one to the other, as 0016 left it.
+    let account = Uuid::new_v4();
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    sqlx::query("INSERT INTO accounts (id, email, password_file) VALUES ($1, $2, $3)")
+        .bind(account)
+        .bind(format!("{account}@example.com"))
+        .bind(vec![1u8; 8])
+        .execute(&pool)
+        .await
+        .expect("account");
+    for id in [a, b] {
+        sqlx::query(
+            "INSERT INTO devices (id, account_id, name, platform, signing_key, agreement_key, state)
+             VALUES ($1, $2, 'Old', 'web', $3, $3, 'trusted')",
+        )
+        .bind(id)
+        .bind(account)
+        .bind(id.as_bytes().repeat(2))
+        .execute(&pool)
+        .await
+        .expect("device");
+    }
+    sqlx::query(
+        "INSERT INTO key_envelopes (account_id, recipient_device_id, sender_device_id, zone, key_id, envelope)
+         VALUES ($1, $2, $3, 'inbox', $4, $5)",
+    )
+    .bind(account)
+    .bind(b)
+    .bind(a)
+    .bind(vec![7u8; 16])
+    .bind(vec![9u8; 40])
+    .execute(&pool)
+    .await
+    .expect("envelope");
+
+    MIGRATOR.run(&pool).await.expect("0017 and 0018 on");
+
+    // The envelope is a device envelope, untouched, and nothing was made for the account.
+    let (kind, recipient, hash): (String, Option<Uuid>, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT recipient_kind, recipient_device_id, service_statement_hash FROM key_envelopes",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("row");
+    assert_eq!((kind.as_str(), recipient, hash), ("device", Some(b), None));
+    let keys: i64 = sqlx::query_scalar("SELECT count(*) FROM account_service_keys")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(keys, 0);
+    // The device row is still unique per recipient, zone and key id.
+    let again = sqlx::query(
+        "INSERT INTO key_envelopes (account_id, recipient_device_id, sender_device_id, zone, key_id, envelope)
+         VALUES ($1, $2, $3, 'inbox', $4, $5)",
+    )
+    .bind(account)
+    .bind(b)
+    .bind(a)
+    .bind(vec![7u8; 16])
+    .bind(vec![1u8; 4])
+    .execute(&pool)
+    .await;
+    assert!(again.is_err(), "a second device envelope for the same key");
+
+    // A service row names no device and a statement hash; any other mix is refused by the table.
+    let insert = |kind: &'static str, recipient: Option<Uuid>, hash: Option<Vec<u8>>, key: u8| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO key_envelopes
+                     (account_id, recipient_kind, recipient_device_id, sender_device_id, zone, key_id,
+                      envelope, service_statement_hash)
+                 VALUES ($1, $2, $3, $4, 'work', $5, $6, $7)",
+            )
+            .bind(account)
+            .bind(kind)
+            .bind(recipient)
+            .bind(a)
+            .bind(vec![key; 16])
+            .bind(vec![1u8; 4])
+            .bind(hash)
+            .execute(&pool)
+            .await
+        }
+    };
+    assert!(
+        insert("service", None, Some(vec![3u8; 32]), 1)
+            .await
+            .is_ok()
+    );
+    assert!(
+        insert("service", None, Some(vec![3u8; 32]), 1)
+            .await
+            .is_err(),
+        "one service envelope per zone and key id"
+    );
+    assert!(
+        insert("service", Some(b), Some(vec![3u8; 32]), 2)
+            .await
+            .is_err()
+    );
+    assert!(insert("service", None, None, 3).await.is_err());
+    assert!(insert("device", None, None, 4).await.is_err());
+    assert!(
+        insert("device", Some(b), Some(vec![3u8; 32]), 5)
+            .await
+            .is_err()
+    );
+    assert!(insert("other", None, Some(vec![3u8; 32]), 6).await.is_err());
+    assert!(
+        insert("service", None, Some(vec![3u8; 31]), 7)
+            .await
+            .is_err()
+    );
+    // A device and a service envelope for the same zone and key id sit side by side.
+    assert!(insert("device", Some(b), None, 1).await.is_ok());
+
+    drop_database(admin, pool, &name).await;
+}

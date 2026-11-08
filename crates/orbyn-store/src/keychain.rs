@@ -121,7 +121,8 @@ impl Store {
                      (account_id, recipient_device_id, sender_device_id, zone, key_id, envelope,
                       previous_key_id, rotation_signer, rotation_signature)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                 ON CONFLICT (recipient_device_id, zone, key_id) DO UPDATE
+                 ON CONFLICT (recipient_device_id, zone, key_id) WHERE recipient_kind = 'device'
+                 DO UPDATE
                  SET sender_device_id = EXCLUDED.sender_device_id,
                      envelope = EXCLUDED.envelope, created_at = now(),
                      previous_key_id = EXCLUDED.previous_key_id,

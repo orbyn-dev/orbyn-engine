@@ -170,6 +170,9 @@ impl IntoResponse for Refusal {
             StoreError::TooManyEnvelopes => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "too_many_envelopes")
             }
+            StoreError::ServiceKeyChanged => (StatusCode::CONFLICT, "service_key_changed"),
+            StoreError::ProtectionAdvanced => (StatusCode::CONFLICT, "protection_advanced"),
+            StoreError::NoServiceKey => (StatusCode::CONFLICT, "service_key_missing"),
             StoreError::InvalidProtection => (StatusCode::BAD_REQUEST, "invalid_protection"),
             StoreError::InvalidProtectionSignature => {
                 (StatusCode::BAD_REQUEST, "invalid_signature")
