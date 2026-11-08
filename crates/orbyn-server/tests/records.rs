@@ -689,23 +689,36 @@ async fn a_token_from_before_a_purge_is_answered_token_expired() {
     assert_eq!(status, StatusCode::OK);
 }
 
+/// How a watched socket ended, if it did.
+#[derive(Debug)]
+enum Ending {
+    /// Still open when the span ran out.
+    Open,
+    /// The server closed it with a Close frame.
+    Closed(Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>),
+    /// The connection went away with no Close frame (a read error or the end of the stream).
+    Dropped,
+}
+
 /// Reads frames for `span`, counting the pings; the socket answers them as it is polled.
-/// Returns the pings seen and how the socket ended, if it did.
-async fn watch(socket: &mut Socket, span: Duration) -> (usize, Option<Message>) {
+/// Returns the pings seen and how the socket ended.
+async fn watch(socket: &mut Socket, span: Duration) -> (usize, Ending) {
     let mut pings = 0;
     let end = tokio::time::Instant::now() + span;
     while let Ok(next) = tokio::time::timeout_at(end, socket.next()).await {
         match next {
             Some(Ok(Message::Ping(_))) => pings += 1,
-            Some(Ok(Message::Close(frame))) => return (pings, Some(Message::Close(frame))),
+            Some(Ok(Message::Close(frame))) => return (pings, Ending::Closed(frame)),
             Some(Ok(_)) => {}
-            Some(Err(_)) | None => return (pings, None),
+            Some(Err(_)) | None => return (pings, Ending::Dropped),
         }
     }
-    (pings, None)
+    (pings, Ending::Open)
 }
 
-const INTERVAL: Duration = Duration::from_millis(150);
+/// Long enough that a loaded machine stalling the test for a moment does not look like silence
+/// (a silent client is closed after two intervals).
+const INTERVAL: Duration = Duration::from_millis(400);
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
@@ -723,7 +736,7 @@ async fn an_answering_client_gets_pings_and_stays_connected() {
     // client gets.
     let (pings, ended) = watch(&mut socket, INTERVAL * 6).await;
     assert!(pings >= 4, "{pings} pings in six intervals");
-    assert!(ended.is_none(), "still open: {ended:?}");
+    assert!(matches!(ended, Ending::Open), "still open: {ended:?}");
 
     // And it still hears a change from the laptop.
     let (status, _) = a
@@ -752,7 +765,7 @@ async fn a_silent_client_is_closed_normally_after_two_intervals() {
         "the server stopped pinging once it gave up: {pings}"
     );
     match ended {
-        Some(Message::Close(Some(frame))) => assert_eq!(frame.code, CloseCode::Normal),
+        Ending::Closed(Some(frame)) => assert_eq!(frame.code, CloseCode::Normal),
         other => panic!("expected a normal close, got {other:?}"),
     }
     assert!(
