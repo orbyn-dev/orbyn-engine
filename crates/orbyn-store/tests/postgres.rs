@@ -2723,7 +2723,7 @@ async fn switching_to_advanced_removes_the_service_copy_and_queues_the_retire_in
     );
     // And the key service is to be told, once for this switch, with a long run of attempts.
     let jobs = retire_jobs(&db, account).await;
-    assert_eq!(jobs, vec![(format!("{account}:2"), 60)]);
+    assert_eq!(jobs, vec![(format!("{account}:2"), i32::MAX)]);
     // Nothing more goes into the service's copy, and the certification is not remembered again.
     assert!(matches!(
         store
@@ -2755,7 +2755,10 @@ async fn switching_to_advanced_removes_the_service_copy_and_queues_the_retire_in
         .expect("advanced again");
     assert_eq!(
         retire_jobs(&db, account).await,
-        vec![(format!("{account}:2"), 60), (format!("{account}:4"), 60)]
+        vec![
+            (format!("{account}:2"), i32::MAX),
+            (format!("{account}:4"), i32::MAX)
+        ]
     );
     db.pool().close().await;
 }
@@ -2904,6 +2907,98 @@ async fn the_statement_hash_is_computed_by_the_store_and_a_certification_in_flig
         assert_eq!(retire_jobs(&db, account).await.len(), 1, "round {round}");
     }
     let _ = (laptop, keys);
+    db.pool().close().await;
+}
+
+/// Holds the account's lock in a transaction that has stored an Advanced setting but not committed
+/// it, as the switch does. A write to the service's copy started now must wait for the lock and,
+/// once the switch commits, find the account Advanced and be refused. Without the lock it would
+/// finish at once (the setting is not visible yet) and the copy would outlive the switch.
+async fn holding_a_switch<T>(
+    db: &Database,
+    account: Uuid,
+    signer: Uuid,
+    write: impl std::future::Future<Output = T>,
+) -> T {
+    let mut switch = db.pool().begin().await.expect("begin");
+    sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(account)
+        .execute(&mut *switch)
+        .await
+        .expect("lock");
+    sqlx::query(
+        "INSERT INTO protection_settings
+             (account_id, seq, level, prev, hash, signed_at, signer_device_id, signature)
+         VALUES ($1, 1, 'advanced', decode(repeat('00', 32), 'hex'), decode(repeat('11', 32), 'hex'), 1, $2,
+                 decode(repeat('22', 64), 'hex'))",
+    )
+    .bind(account)
+    .bind(signer)
+    .execute(&mut *switch)
+    .await
+    .expect("setting");
+    tokio::pin!(write);
+    tokio::select! {
+        _ = &mut write => panic!("the write did not wait for the account's lock"),
+        () = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+    switch.commit().await.expect("commit the switch");
+    tokio::time::timeout(Duration::from_secs(10), write)
+        .await
+        .expect("the write finished once the lock was free")
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_write_to_the_service_copy_waits_for_a_switch_that_holds_the_account_and_is_then_refused()
+{
+    let (store, db) = store().await;
+    // The certification put.
+    let account = account(&db).await;
+    let laptop = device(&db, account, "trusted").await;
+    let new = certification(5);
+    let refused = holding_a_switch(
+        &db,
+        account,
+        laptop.device_id,
+        store.put_service_certification(account, &new),
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(StoreError::ProtectionAdvanced)),
+        "{refused:?}"
+    );
+    assert_eq!(
+        store.service_certification(account).await.expect("cert"),
+        None
+    );
+
+    // The envelope put, on an account that already has its certification and one envelope.
+    let account = self::account(&db).await;
+    let laptop = device(&db, account, "trusted").await;
+    store
+        .put_service_certification(account, &certification(5))
+        .await
+        .expect("certification");
+    let envelopes = [service_envelope("inbox", 1, b"service", 5)];
+    let refused = holding_a_switch(
+        &db,
+        account,
+        laptop.device_id,
+        store.put_service_envelopes(&laptop, &envelopes),
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(StoreError::ProtectionAdvanced)),
+        "{refused:?}"
+    );
+    assert!(
+        store
+            .list_service_envelopes(&laptop)
+            .await
+            .expect("held")
+            .is_empty()
+    );
     db.pool().close().await;
 }
 

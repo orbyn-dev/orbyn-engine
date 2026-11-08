@@ -61,9 +61,10 @@ pub const ZONE_CHANGED_JOB: &str = "zone_changed";
 /// idempotency key names the account and the setting, so one switch queues one job.
 pub const SERVICE_KEY_RETIRE_JOB: &str = "service_key_retire";
 
-/// Attempts the retire job gets: it retries with backoff for days, because the key service being
-/// down must not leave a key alive that the person asked to have destroyed.
-pub const SERVICE_KEY_RETIRE_ATTEMPTS: i32 = 60;
+/// Attempts the retire job gets: **no limit in practice** (the queue's backoff caps at ten minutes,
+/// so it tries every ten minutes until the key service has done it). A limit would leave the key
+/// alive under Advanced once it ran out, and the finished-job cleanup would remove the evidence.
+pub const SERVICE_KEY_RETIRE_ATTEMPTS: i32 = i32::MAX;
 
 /// Sizes and counts the store accepts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
