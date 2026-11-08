@@ -64,7 +64,10 @@ services:
       ORBYN_ACCOUNT_URL: https://account-staging.orbyn.dev
       # Staging only: no mail is sent; each address and code is written to the log
       # (docs/staging.md). Refused unless ORBYN_ENV=staging and ORBYN_SIGNUP=invite.
-      ORBYN_MAIL: log-codes
+      # Real mail: set ORBYN_MAIL=, ORBYN_SMTP_URL and ORBYN_MAIL_FROM in .env.staging.
+      ORBYN_MAIL: ${ORBYN_MAIL-log-codes}
+      ORBYN_SMTP_URL: ${ORBYN_SMTP_URL:-}
+      ORBYN_MAIL_FROM: ${ORBYN_MAIL_FROM:-}
       ORBYN_ENV: staging
       # Sign-up needs an invite code from `orbyn invite create`.
       ORBYN_SIGNUP: invite
@@ -87,7 +90,9 @@ services:
       DATABASE_URL: postgres://orbyn:${POSTGRES_PASSWORD:-}@postgres:5432/orbyn
       ORBYN_AUTH_SETUP: ${ORBYN_AUTH_SETUP:-}
       ORBYN_ACCOUNT_URL: https://account-staging.orbyn.dev
-      ORBYN_MAIL: log-codes
+      ORBYN_MAIL: ${ORBYN_MAIL-log-codes}
+      ORBYN_SMTP_URL: ${ORBYN_SMTP_URL:-}
+      ORBYN_MAIL_FROM: ${ORBYN_MAIL_FROM:-}
       ORBYN_ENV: staging
       ORBYN_SIGNUP: invite
       ORBYN_LOG: info

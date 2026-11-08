@@ -88,15 +88,30 @@ The server and the worker refuse to start in this mode (Account Designs, em-ops-
 
 ### Before any tester is invited: real mail
 
-`log-codes` is for our own testing only. **Before the first beta tester gets an invite**, staging (or production) must send real mail as `Orbyn <hello@orbyn.dev>`:
+`log-codes` is for our own testing only. **Before the first beta tester gets an invite**, staging (or production) must send real mail as `Orbyn <hello@orbyn.dev>`. The provider is [Resend](https://resend.com), over SMTP. Do each step yourself; the secrets never go through chat.
 
-1. **Provider.** Choose an SMTP provider. That decision is made at this step.
-2. **DNS on orbyn.dev, in Cloudflare:**
-   - **SPF:** a TXT record on `orbyn.dev`, `v=spf1 include:<provider's SPF host> -all`. Merge it into any SPF record that already exists; a domain has only one.
-   - **DKIM:** the provider's selector records, CNAME or TXT at `<selector>._domainkey.orbyn.dev`, exactly as the provider gives them.
-   - **DMARC:** a TXT record at `_dmarc.orbyn.dev`, `v=DMARC1; p=quarantine; rua=mailto:hello@orbyn.dev`. Start at `p=quarantine`, and move to `p=reject` once reports are clean.
-3. **Settings.** Set `ORBYN_SMTP_URL` in `.env.staging` (`smtps://user:password@host:465`, or `smtp://…:587?tls=required`). Then remove the `ORBYN_MAIL: log-codes` lines from `compose.staging.yaml` for the server and the worker. With no `ORBYN_MAIL`, the worker sends through `ORBYN_SMTP_URL`.
-4. **Check.** Send a sign-up code to a test address, and check that SPF, DKIM and DMARC all pass in the headers.
+1. **Account.** Sign up at resend.com with an address you control, and turn on two-factor sign-in in the account settings.
+2. **Add the domain.** Dashboard > Domains > Add Domain. Name: `orbyn.dev` (the root, not a subdomain: the mail is sent *from* `hello@orbyn.dev`, and Resend only sends from a domain you verified). Leave the return path at its default (`send`). Resend then shows a **Records** tab with the exact records for this domain. Use those values, character for character.
+3. **DNS in Cloudflare** (orbyn.dev > DNS > Records). Add what the Records tab shows. It is three records, all on names that Cloudflare Email Routing does not use, so `hello@orbyn.dev` keeps receiving mail:
+   - **DKIM:** a TXT record at `resend._domainkey` (the value starts `p=`).
+   - **Return path, mail exchanger:** an MX record at `send`, priority 10, pointing at the `feedback-smtp...amazonses.com` host the tab names.
+   - **Return path, SPF:** a TXT record at `send`, `v=spf1 include:amazonses.com ~all`.
+   - Set **Proxy status to DNS only** (grey cloud) on every one; Cloudflare must not proxy them.
+   - **Do not touch the SPF record on `orbyn.dev` itself.** Cloudflare Email Routing's SPF stays. Resend needs none on the root, because the return path is `send.orbyn.dev`.
+   - **DMARC:** add a TXT record at `_dmarc`, `v=DMARC1; p=none; rua=mailto:hello@orbyn.dev`. If a `_dmarc` record already exists, edit it; there can be one. Start at `p=none`, and move to `p=quarantine`, then `p=reject`, once the reports and the header check below are clean.
+   - In Resend press **Verify DNS Records**. It usually takes 15 minutes, and can take up to 72 hours. `dns.email` shows what Cloudflare is serving.
+4. **API key.** Resend > API Keys > Create, permission **Sending access**, limited to the `orbyn.dev` domain. Copy it once; it is the SMTP password.
+5. **Settings on the staging host**, in `.env.staging` (never in chat, a ticket or git):
+   ```
+   ORBYN_MAIL=
+   ORBYN_SMTP_URL=smtps://resend:<the API key>@smtp.resend.com:465
+   ORBYN_MAIL_FROM=Orbyn <hello@orbyn.dev>
+   ```
+   The empty `ORBYN_MAIL=` line turns the log-codes mode off (left out, it stays on). If the key ever has characters other than letters and digits, write them as `%xx`. Then restart the server and the worker: `dc up -d server worker`.
+6. **Check the headers.** Sign up with an invite using a Gmail address you control. In Gmail open the message > ⋮ > **Show original**. It must say `SPF: PASS`, `DKIM: PASS` and `DMARC: PASS`, with `Return-Path` at `send.orbyn.dev` and the `From` as `Orbyn <hello@orbyn.dev>`. If any fails, do not invite anyone: re-check the records against the Records tab. Check one more address on another provider (Outlook or iCloud) and the spam folder.
+7. **Replies.** The `From` is `hello@orbyn.dev`, so a reply goes to Cloudflare Email Routing and reaches whoever that forwards to. Send yourself one and reply to it.
+
+The record names above follow Resend's documentation for a root domain with the default return path. The values are made per domain in the dashboard, so the Records tab always wins over this list.
 
 ## End-to-end checklist
 
