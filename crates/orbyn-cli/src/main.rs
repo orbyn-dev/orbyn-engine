@@ -489,12 +489,27 @@ mod tests {
 
     // ---- ORBYN_MAIL=log-codes ----
 
+    /// What a test captured. The log events of the thread that asked for it land here.
     #[derive(Clone, Default)]
     struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
-    impl std::io::Write for Logs {
+    thread_local! {
+        /// Where this thread's log events go, if a test is capturing them.
+        static CAPTURING: std::cell::RefCell<Option<Logs>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// The writer of the one subscriber the tests share: it writes into the capture of the thread
+    /// that logged, and drops the event on a thread that is not capturing.
+    #[derive(Clone, Copy)]
+    struct ToThisThreadsCapture;
+
+    impl std::io::Write for ToThisThreadsCapture {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("lock").extend_from_slice(bytes);
+            CAPTURING.with(|slot| {
+                if let Some(logs) = slot.borrow().as_ref() {
+                    logs.0.lock().expect("lock").extend_from_slice(bytes);
+                }
+            });
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -502,23 +517,44 @@ mod tests {
         }
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
-        type Writer = Logs;
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ToThisThreadsCapture {
+        type Writer = ToThisThreadsCapture;
         fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
+            *self
         }
     }
 
-    fn capture() -> (Logs, tracing::subscriber::DefaultGuard) {
+    /// Stops this thread's capture when the test ends.
+    struct Capturing;
+
+    impl Drop for Capturing {
+        fn drop(&mut self) {
+            CAPTURING.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    /// Captures the log events of this test.
+    ///
+    /// **One subscriber for the whole test binary, set once as the global default**, with the
+    /// capture chosen per thread. A scoped default (`set_default`) per test looks the same but is
+    /// not: `tracing` decides once per call site whether anyone is listening, and a call site that
+    /// another test reached on a thread with no subscriber is remembered as "nobody", so this
+    /// test's event was dropped depending on which test got there first. With a global subscriber
+    /// there is always a listener and nothing is cached as "never".
+    fn capture() -> (Logs, Capturing) {
+        static SUBSCRIBER: std::sync::Once = std::sync::Once::new();
+        SUBSCRIBER.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_writer(ToThisThreadsCapture)
+                    .with_ansi(false)
+                    .without_time()
+                    .finish(),
+            );
+        });
         let logs = Logs::default();
-        let guard = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(logs.clone())
-                .with_ansi(false)
-                .without_time()
-                .finish(),
-        );
-        (logs, guard)
+        CAPTURING.with(|slot| *slot.borrow_mut() = Some(logs.clone()));
+        (logs, Capturing)
     }
 
     /// The settings of a staging worker, with a real setup to open messages.
