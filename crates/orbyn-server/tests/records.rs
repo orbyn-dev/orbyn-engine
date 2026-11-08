@@ -882,6 +882,8 @@ enum Say {
     OtherAccount,
     /// A statement hash that is not the statement's.
     WrongHash,
+    /// A good answer, but the person switched to Advanced while the call was out.
+    AdvancedDuringCall,
 }
 
 /// A key service that answers from a script and counts its calls. The key is one fixed P-256 key.
@@ -889,6 +891,8 @@ struct FakeKeyService {
     say: std::sync::Mutex<Say>,
     key: orbyn_crypto::P256Keys,
     calls: std::sync::atomic::AtomicUsize,
+    /// The database and the account whose setting the fake flips for `AdvancedDuringCall`.
+    flip: std::sync::Mutex<Option<(orbyn_core::sqlx::PgPool, Uuid)>>,
 }
 
 impl FakeKeyService {
@@ -897,6 +901,7 @@ impl FakeKeyService {
             say: std::sync::Mutex::new(say),
             key: orbyn_crypto::P256Keys::generate().expect("key"),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            flip: std::sync::Mutex::new(None),
         })
     }
 
@@ -950,7 +955,14 @@ impl ServiceKeySource for FakeKeyService {
         Box::pin(async move {
             match self.refusal() {
                 Some(e) => Err(e),
-                None => Ok(self.answer(account, None)),
+                None => {
+                    let flip = self.flip.lock().expect("lock").clone();
+                    let say = *self.say.lock().expect("lock");
+                    if let (Some((pool, id)), Say::AdvancedDuringCall) = (flip, say) {
+                        advance(&pool, id).await;
+                    }
+                    Ok(self.answer(account, None))
+                }
             }
         })
     }
@@ -1239,4 +1251,96 @@ async fn ask_key(server: &Server, token: &str) -> (StatusCode, Value) {
     server
         .call(Method::GET, "/v1/keychain/service-key", Some(token), None)
         .await
+}
+
+/// Stores an Advanced setting for the account as the newest, directly.
+async fn advance(pool: &orbyn_core::sqlx::PgPool, account: Uuid) {
+    orbyn_core::sqlx::query(
+        "INSERT INTO protection_settings
+             (account_id, seq, level, prev, hash, signed_at, signer_device_id, signature)
+         VALUES ($1, 1, 'advanced', decode(repeat('00', 32), 'hex'), decode(repeat('11', 32), 'hex'),
+                 1, $2, decode(repeat('22', 64), 'hex'))",
+    )
+    .bind(account)
+    .bind(Uuid::new_v4())
+    .execute(pool)
+    .await
+    .expect("setting");
+}
+
+async fn account_of(server: &Server, email: &str) -> Uuid {
+    orbyn_core::sqlx::query_scalar("SELECT id FROM accounts WHERE email = $1")
+        .bind(email.to_lowercase())
+        .fetch_one(server.db.pool())
+        .await
+        .expect("account")
+}
+
+async fn retire_jobs(server: &Server, account: Uuid) -> i64 {
+    orbyn_core::sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE kind = 'service_key_retire' AND payload->>'account_id' = $1",
+    )
+    .bind(account.to_string())
+    .fetch_one(server.db.pool())
+    .await
+    .expect("jobs")
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn an_advanced_account_or_a_scheduled_deletion_never_reaches_the_key_service() {
+    let fake = FakeKeyService::new(Say::Good);
+    let server = server_ks(fake.clone()).await;
+    // Advanced: refused before any call, so no key is made in the log.
+    let (email, token) = server.sign_up().await;
+    let account = account_of(&server, &email).await;
+    advance(server.db.pool(), account).await;
+    let (status, body) = ask_key(&server, &token).await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::CONFLICT, &json!("protection_advanced"))
+    );
+    assert_eq!(fake.calls(), 0);
+    // A scheduled deletion: the same.
+    let (email, token) = server.sign_up().await;
+    orbyn_core::sqlx::query(
+        "UPDATE accounts SET deletion_scheduled_at = now() + interval '7 days' WHERE email = $1",
+    )
+    .bind(email.to_lowercase())
+    .execute(server.db.pool())
+    .await
+    .expect("schedule");
+    let (status, body) = ask_key(&server, &token).await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::CONFLICT, &json!("deletion_scheduled"))
+    );
+    assert_eq!(fake.calls(), 0);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_switch_to_advanced_while_the_key_is_made_queues_a_retire() {
+    let fake = FakeKeyService::new(Say::AdvancedDuringCall);
+    let server = server_ks(fake.clone()).await;
+    let (email, token) = server.sign_up().await;
+    let account = account_of(&server, &email).await;
+    *fake.flip.lock().expect("lock") = Some((server.db.pool().clone(), account));
+    assert_eq!(retire_jobs(&server, account).await, 0);
+    let (status, body) = ask_key(&server, &token).await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::CONFLICT, &json!("protection_advanced"))
+    );
+    assert_eq!(fake.calls(), 1);
+    // The key the service made is not remembered, and something will retire it.
+    assert_eq!(retire_jobs(&server, account).await, 1);
+    let held: i64 = orbyn_core::sqlx::query_scalar(
+        "SELECT count(*) FROM account_service_keys WHERE account_id = $1",
+    )
+    .bind(account)
+    .fetch_one(server.db.pool())
+    .await
+    .expect("keys");
+    assert_eq!(held, 0);
 }

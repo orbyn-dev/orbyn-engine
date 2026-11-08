@@ -188,9 +188,17 @@ async fn service_key(
         .await
         .map_err(key_service_refusal)?;
     let (certification, statement_hash) = checked_certification(&answer, account)?;
-    store
+    if let Err(error) = store
         .put_service_certification(session.account_id, &certification)
-        .await?;
+        .await
+    {
+        // The person switched to Advanced while the key service was making the key: it now holds
+        // a key nothing else will retire (the switch's own job may have run already).
+        if matches!(error, orbyn_store::StoreError::ProtectionAdvanced) {
+            store.queue_service_key_retire(session.account_id).await?;
+        }
+        return Err(error.into());
+    }
     // Whether a published head holds the entry yet: the create answer does not say.
     let covered = source
         .get(account)

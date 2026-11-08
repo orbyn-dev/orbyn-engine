@@ -263,6 +263,26 @@ impl Store {
     /// device. The record server calls the key service only after this.
     pub async fn begin_service_key_ask(&self, session: &Session) -> Result<()> {
         require_trusted(&self.pool, session, false).await?;
+        // Before the key service is asked to make anything: an Advanced account gets no key, and
+        // neither does one whose deletion is scheduled. This read is not under the account lock; a
+        // switch that lands after it is caught when the certification is kept
+        // ([`Store::queue_service_key_retire`]).
+        let (advanced, scheduled): (Option<String>, Option<bool>) = sqlx::query_as(
+            "SELECT (SELECT level FROM protection_settings WHERE account_id = a.id
+                     ORDER BY seq DESC LIMIT 1),
+                    a.deletion_scheduled_at IS NOT NULL
+             FROM accounts a WHERE a.id = $1",
+        )
+        .bind(session.account_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::DeviceNotTrusted)?;
+        if advanced.as_deref() == Some("advanced") {
+            return Err(StoreError::ProtectionAdvanced);
+        }
+        if scheduled == Some(true) {
+            return Err(StoreError::DeletionScheduled);
+        }
         let subject: [u8; 32] = Sha256::digest(session.account_id.as_bytes()).into();
         let allowed = limits::allow(
             &self.pool,
@@ -276,6 +296,21 @@ impl Store {
         } else {
             Err(StoreError::TooManyServiceKeyAsks)
         }
+    }
+
+    /// Queues a retire of the account's service key, for a key the key service made after the
+    /// person switched to Advanced (the switch's own job may already have run, finding nothing to
+    /// retire). One job per call: retiring is idempotent there.
+    pub async fn queue_service_key_retire(&self, account_id: Uuid) -> Result<()> {
+        orbyn_core::jobs::enqueue_with_attempts(
+            &self.pool,
+            crate::SERVICE_KEY_RETIRE_JOB,
+            serde_json::json!({"account_id": account_id}),
+            Some(&format!("{account_id}:late:{}", Uuid::new_v4())),
+            crate::SERVICE_KEY_RETIRE_ATTEMPTS,
+        )
+        .await?;
+        Ok(())
     }
 
     /// The service envelopes of the session's account, for a test or the recovery that will open
