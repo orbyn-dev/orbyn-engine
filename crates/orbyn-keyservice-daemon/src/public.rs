@@ -514,3 +514,49 @@ pub fn serve(listener: tokio::net::TcpListener, router: Router) -> tokio::task::
 pub fn header_name(text: &str) -> Option<HeaderName> {
     header::HeaderName::from_bytes(text.trim().to_ascii_lowercase().as_bytes()).ok()
 }
+
+/// The public API's settings from the environment, checked before anything is bound.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PublicSettings {
+    /// `ORBYN_KS_PUBLIC_BIND`; without it there is no public API.
+    pub bind: Option<(SocketAddr, String)>,
+    pub client_ip_header: Option<HeaderName>,
+    pub allowed_origins: Vec<String>,
+}
+
+impl PublicSettings {
+    /// An error is the operator message, already formatted (TODO-design: the three messages are
+    /// plain text in the internal bind's shape, not yet drawn).
+    pub fn parse(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let get = |name: &str| lookup(name).filter(|v| !v.trim().is_empty());
+        let bind = match get("ORBYN_KS_PUBLIC_BIND") {
+            None => None,
+            Some(text) => {
+                let address = text
+                    .trim()
+                    .parse::<SocketAddr>()
+                    .map_err(|_| crate::messages::public_bind_invalid())?;
+                Some((address, text))
+            }
+        };
+        let client_ip_header = match get("ORBYN_KS_CLIENT_IP_HEADER") {
+            None => None,
+            Some(text) => {
+                Some(header_name(&text).ok_or_else(crate::messages::client_ip_header_invalid)?)
+            }
+        };
+        let allowed_origins = get("ORBYN_KS_ALLOWED_ORIGINS")
+            .map(|text| {
+                text.split(',')
+                    .map(|o| o.trim().to_owned())
+                    .filter(|o| !o.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Self {
+            bind,
+            client_ip_header,
+            allowed_origins,
+        })
+    }
+}

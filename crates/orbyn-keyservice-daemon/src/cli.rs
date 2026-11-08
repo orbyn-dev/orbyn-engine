@@ -199,34 +199,15 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
         .map_err(|_| messages::cannot_listen(&bind_text))?;
     // The public API, when it has an address: its own plain-HTTP listener, apart from the
     // internal one, behind the tunnel that ends TLS. Bound before anything runs.
-    let public_listener = match get(env, "ORBYN_KS_PUBLIC_BIND") {
+    let public_settings = public::PublicSettings::parse(env)?;
+    let public_listener = match &public_settings.bind {
         None => None,
-        Some(text) => {
-            let address: SocketAddr = text
-                .trim()
-                .parse()
-                .map_err(|_| messages::public_bind_invalid())?;
-            Some(
-                tokio::net::TcpListener::bind(address)
-                    .await
-                    .map_err(|_| messages::cannot_listen_public(&text))?,
-            )
-        }
+        Some((address, text)) => Some(
+            tokio::net::TcpListener::bind(address)
+                .await
+                .map_err(|_| messages::cannot_listen_public(text))?,
+        ),
     };
-    let client_ip_header = match get(env, "ORBYN_KS_CLIENT_IP_HEADER") {
-        None => None,
-        Some(text) => {
-            Some(public::header_name(&text).ok_or_else(messages::client_ip_header_invalid)?)
-        }
-    };
-    let allowed_origins: Vec<String> = get(env, "ORBYN_KS_ALLOWED_ORIGINS")
-        .map(|text| {
-            text.split(',')
-                .map(|o| o.trim().to_owned())
-                .filter(|o| !o.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
     let keys_info = public::KeysInfo {
         log_keys: publisher
             .as_ref()
@@ -271,8 +252,8 @@ async fn serve(env: Env<'_>) -> Result<(), String> {
             public::router(
                 state.store.clone(),
                 public::PublicConfig {
-                    allowed_origins,
-                    client_ip_header,
+                    allowed_origins: public_settings.allowed_origins.clone(),
+                    client_ip_header: public_settings.client_ip_header.clone(),
                     keys: keys_info,
                 },
             ),

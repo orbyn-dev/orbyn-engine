@@ -210,6 +210,7 @@ The threat model gains:
 - invitation timing, under keyed, expiring email digests;
 - the owner's device ids in cross-account notices;
 - witness fetches: a witness sees the addresses of devices that fetch its cosignatures;
+- the transparency log is public: anyone can read the heads, the log's size over time, and the entries of an account whose service public key they know (the certification names the account id); a lookup for a key that is not in the map shows a neighbour's map key hash and value hash; the key service's public API sees the addresses of devices that look up or fetch (it logs none), and the tunnel in front of it sees them as it does for the record server;
 - identity lookups: the key service sees which emails a device looks up, and when, and both servers learn whether an email has an entry when an accepted invitation's lookup is made.
 
 Contents stay sealed.

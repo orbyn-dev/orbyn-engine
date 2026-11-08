@@ -193,10 +193,17 @@ services:
     restart: unless-stopped
     entrypoint: ["/usr/local/bin/smoke-entry.sh"]
     command: ["serve"]
+    # Loopback only, like everything else here. The internal port (8443) is not published.
+    ports:
+      - "127.0.0.1:${KS_PUBLIC_PORT:-18480}:8480"
     environment:
       ORBYN_KEYSERVICE_DATABASE_URL: postgres://orbyn_ks_runtime:${KS_RUNTIME_PASSWORD:-}@ks-postgres:5432/orbyn_keyservice
       ORBYN_HSM_PIN: ${KS_HSM_PIN:-}
       ORBYN_KS_INTERNAL_BIND: 0.0.0.0:8443
+      # The public API: plain HTTP, behind the tunnel (log-staging.orbyn.dev -> http://keyservice:8480).
+      ORBYN_KS_PUBLIC_BIND: 0.0.0.0:8480
+      ORBYN_KS_CLIENT_IP_HEADER: cf-connecting-ip
+      ORBYN_KS_ALLOWED_ORIGINS: https://account-staging.orbyn.dev
       # Witness settings are read by the head publisher; a build without it ignores them.
       ORBYN_KS_WITNESS_THRESHOLD: "2"
       ORBYN_KS_LOG_KEY_VERSION: "1"
