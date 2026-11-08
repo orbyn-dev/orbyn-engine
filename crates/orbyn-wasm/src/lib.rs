@@ -726,6 +726,7 @@ impl SyncEngine {
         let devices: wire::DeviceList = parse(devices_json)?;
         to_json(&wire::PutKeyEnvelopes {
             envelopes: self.engine.envelopes_for(zone, &devices)?,
+            service_envelopes: None,
         })
     }
 

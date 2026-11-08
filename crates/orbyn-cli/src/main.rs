@@ -241,6 +241,9 @@ async fn serve(config: Config) -> Result<(), String> {
             tracing::warn!("ORBYN_AUTH_SETUP is not set: sign-up, sign-in and records answer 503")
         }
     }
+    if let Some(client) = key_service_client(&config)? {
+        state = state.with_key_service(Arc::new(client));
+    }
     if let Some(name) = &config.client_ip_header {
         let header = name
             .parse()

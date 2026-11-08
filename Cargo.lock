@@ -1960,6 +1960,7 @@ dependencies = [
  "orbyn-contracts",
  "orbyn-core",
  "orbyn-crypto",
+ "orbyn-keyservice-client",
  "orbyn-planner",
  "orbyn-store",
  "serde",

@@ -43,6 +43,80 @@ pub struct AppState {
     feeds: Option<orbyn_core::feeds::Feeds>,
     client_ip_header: Option<HeaderName>,
     sync_keepalive: Duration,
+    key_service: Option<Arc<dyn ServiceKeySource>>,
+}
+
+/// What the record server asks the key service: the account's certified service key, made if it
+/// has none, and whether a published head holds it yet. The real one is the key service's client;
+/// a test stands in with its own. It has no call that opens, derives or signs anything.
+pub trait ServiceKeySource: Send + Sync {
+    fn create_or_get(
+        &self,
+        account: [u8; 16],
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        orbyn_keyservice_client::ServiceKeyAnswer,
+                        orbyn_keyservice_client::ClientError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    >;
+
+    fn get(
+        &self,
+        account: [u8; 16],
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Option<orbyn_keyservice_client::ServiceKeyAnswer>,
+                        orbyn_keyservice_client::ClientError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    >;
+}
+
+impl ServiceKeySource for orbyn_keyservice_client::Client {
+    fn create_or_get(
+        &self,
+        account: [u8; 16],
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        orbyn_keyservice_client::ServiceKeyAnswer,
+                        orbyn_keyservice_client::ClientError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(
+            async move { orbyn_keyservice_client::Client::create_or_get(self, &account).await },
+        )
+    }
+
+    fn get(
+        &self,
+        account: [u8; 16],
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Option<orbyn_keyservice_client::ServiceKeyAnswer>,
+                        orbyn_keyservice_client::ClientError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move { orbyn_keyservice_client::Client::get(self, &account).await })
+    }
 }
 
 /// How often `/v1/sync` pings an idle socket, unless told otherwise. Tunnels and proxies drop
@@ -59,6 +133,7 @@ impl AppState {
             feeds: None,
             client_ip_header: None,
             sync_keepalive: DEFAULT_SYNC_KEEPALIVE,
+            key_service: None,
         }
     }
 
@@ -84,6 +159,13 @@ impl AppState {
     /// through that proxy.
     pub fn with_client_ip_header(mut self, header: HeaderName) -> Self {
         self.client_ip_header = Some(header);
+        self
+    }
+
+    /// Enables `GET /v1/keychain/service-key`. Without it that route answers 503
+    /// `key_service_unavailable` and nothing is escrowed.
+    pub fn with_key_service(mut self, source: Arc<dyn ServiceKeySource>) -> Self {
+        self.key_service = Some(source);
         self
     }
 

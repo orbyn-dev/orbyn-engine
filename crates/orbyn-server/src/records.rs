@@ -111,6 +111,10 @@ pub(crate) fn routes() -> Router<AppState> {
 pub(crate) enum Refusal {
     Store(StoreError),
     Unavailable,
+    /// No key service is configured, or it cannot be reached or gave an answer that makes no sense.
+    KeyServiceUnavailable,
+    /// The account's service key was retired (Advanced): the key service makes no second key.
+    ServiceKeyRetired,
     BadRequest,
     TooLarge,
 }
@@ -145,6 +149,20 @@ impl IntoResponse for Refusal {
                     "The request body is too large.",
                 );
             }
+            Self::KeyServiceUnavailable => {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "key_service_unavailable",
+                    "The key service is not available.",
+                );
+            }
+            Self::ServiceKeyRetired => {
+                return error(
+                    StatusCode::CONFLICT,
+                    "service_key_retired",
+                    "The account's service key was retired.",
+                );
+            }
             Self::Store(err) => err,
         };
         let (status, code) = match &err {
@@ -173,6 +191,10 @@ impl IntoResponse for Refusal {
             StoreError::ServiceKeyChanged => (StatusCode::CONFLICT, "service_key_changed"),
             StoreError::ProtectionAdvanced => (StatusCode::CONFLICT, "protection_advanced"),
             StoreError::NoServiceKey => (StatusCode::CONFLICT, "service_key_missing"),
+            StoreError::TooManyServiceKeyAsks => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_service_key_requests",
+            ),
             StoreError::InvalidProtection => (StatusCode::BAD_REQUEST, "invalid_protection"),
             StoreError::InvalidProtectionSignature => {
                 (StatusCode::BAD_REQUEST, "invalid_signature")

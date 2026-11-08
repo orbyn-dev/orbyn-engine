@@ -500,7 +500,10 @@ async fn two_devices_sync_encrypted_tasks_through_the_server() {
             Method::POST,
             "/v1/keychain/envelopes",
             Some(&a.token),
-            Some(value(&wire::PutKeyEnvelopes { envelopes })),
+            Some(value(&wire::PutKeyEnvelopes {
+                envelopes,
+                service_envelopes: None,
+            })),
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
@@ -689,7 +692,10 @@ async fn two_devices_sync_encrypted_tasks_through_the_server() {
             Method::POST,
             "/v1/keychain/envelopes",
             Some(&a.token),
-            Some(value(&wire::PutKeyEnvelopes { envelopes })),
+            Some(value(&wire::PutKeyEnvelopes {
+                envelopes,
+                service_envelopes: None,
+            })),
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");

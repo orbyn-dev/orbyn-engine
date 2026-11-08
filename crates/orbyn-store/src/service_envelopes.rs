@@ -6,7 +6,7 @@
 //! the certification itself (the identity's signature, then the transparency log).
 
 use crate::{Result, Store, StoreError, check_zone_name, keychain::KEY_ID_LEN, require_trusted};
-use orbyn_core::accounts::Session;
+use orbyn_core::accounts::{Session, limits};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -161,6 +161,24 @@ impl Store {
         if envelopes.is_empty() || envelopes.len() > self.limits.max_envelope_batch {
             return Err(StoreError::BatchTooLarge);
         }
+        self.check_service_envelopes(envelopes)?;
+        let mut tx = self.pool.begin().await?;
+        // The account first, then devices, as every envelope upload does; it also serializes the
+        // uploads of one account, so the count is exact and a switch to Advanced cannot slip
+        // between the check and the write.
+        sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(session.account_id)
+            .execute(&mut *tx)
+            .await?;
+        require_trusted(&mut *tx, session, true).await?;
+        self.write_service_envelopes(&mut tx, session, envelopes)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The checks that need no database: sizes, names and no repeated zone and key id.
+    pub(crate) fn check_service_envelopes(&self, envelopes: &[NewServiceEnvelope]) -> Result<()> {
         let mut seen = BTreeSet::new();
         for e in envelopes {
             check_zone_name(&e.zone)?;
@@ -172,16 +190,18 @@ impl Store {
                 return Err(StoreError::InvalidEnvelope);
             }
         }
-        let mut tx = self.pool.begin().await?;
-        // The account first, then devices, as every envelope upload does; it also serializes the
-        // uploads of one account, so the count below is exact and a switch to Advanced cannot
-        // slip between the check and the write.
-        sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR NO KEY UPDATE")
-            .bind(session.account_id)
-            .execute(&mut *tx)
-            .await?;
-        require_trusted(&mut *tx, session, true).await?;
-        if newest_level_is_advanced(&mut tx, session.account_id).await? {
+        Ok(())
+    }
+
+    /// The writes and the checks that need the account, inside the caller's transaction, which
+    /// already holds the account's lock and has found the device trusted.
+    pub(crate) async fn write_service_envelopes(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        session: &Session,
+        envelopes: &[NewServiceEnvelope],
+    ) -> Result<()> {
+        if newest_level_is_advanced(tx, session.account_id).await? {
             return Err(StoreError::ProtectionAdvanced);
         }
         // While the account's deletion is scheduled nothing is written to the service's copy: a
@@ -191,7 +211,7 @@ impl Store {
             "SELECT deletion_scheduled_at IS NOT NULL FROM accounts WHERE id = $1",
         )
         .bind(session.account_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
         if scheduled == Some(true) {
             return Err(StoreError::DeletionScheduled);
@@ -200,7 +220,7 @@ impl Store {
             "SELECT statement_hash FROM account_service_keys WHERE account_id = $1",
         )
         .bind(session.account_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
         let held = hash_of(held.ok_or(StoreError::NoServiceKey)?)?;
         if envelopes.iter().any(|e| e.statement_hash != held) {
@@ -224,19 +244,72 @@ impl Store {
             .bind(&e.key_id)
             .bind(&e.envelope)
             .bind(e.statement_hash.as_slice())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
         let count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM key_envelopes WHERE account_id = $1 AND recipient_kind = 'service'",
         )
         .bind(session.account_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         if count > self.limits.max_envelopes_per_device {
             return Err(StoreError::TooManyEnvelopes);
         }
-        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Counts one ask for the account's service key against its hourly limit, for a trusted
+    /// device. The record server calls the key service only after this.
+    pub async fn begin_service_key_ask(&self, session: &Session) -> Result<()> {
+        require_trusted(&self.pool, session, false).await?;
+        // Before the key service is asked to make anything: an Advanced account gets no key, and
+        // neither does one whose deletion is scheduled. This read is not under the account lock; a
+        // switch that lands after it is caught when the certification is kept
+        // ([`Store::queue_service_key_retire`]).
+        let (advanced, scheduled): (Option<String>, Option<bool>) = sqlx::query_as(
+            "SELECT (SELECT level FROM protection_settings WHERE account_id = a.id
+                     ORDER BY seq DESC LIMIT 1),
+                    a.deletion_scheduled_at IS NOT NULL
+             FROM accounts a WHERE a.id = $1",
+        )
+        .bind(session.account_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::DeviceNotTrusted)?;
+        if advanced.as_deref() == Some("advanced") {
+            return Err(StoreError::ProtectionAdvanced);
+        }
+        if scheduled == Some(true) {
+            return Err(StoreError::DeletionScheduled);
+        }
+        let subject: [u8; 32] = Sha256::digest(session.account_id.as_bytes()).into();
+        let allowed = limits::allow(
+            &self.pool,
+            "service-key-ask",
+            &subject,
+            self.limits.service_key_asks_per_hour,
+        )
+        .await?;
+        if allowed {
+            Ok(())
+        } else {
+            Err(StoreError::TooManyServiceKeyAsks)
+        }
+    }
+
+    /// Queues a retire of the account's service key, for a key the key service made after the
+    /// person switched to Advanced (the switch's own job may already have run, finding nothing to
+    /// retire). One job per call: retiring is idempotent there.
+    pub async fn queue_service_key_retire(&self, account_id: Uuid) -> Result<()> {
+        orbyn_core::jobs::enqueue_with_attempts(
+            &self.pool,
+            crate::SERVICE_KEY_RETIRE_JOB,
+            serde_json::json!({"account_id": account_id}),
+            Some(&format!("{account_id}:late:{}", Uuid::new_v4())),
+            crate::SERVICE_KEY_RETIRE_ATTEMPTS,
+        )
+        .await?;
         Ok(())
     }
 
