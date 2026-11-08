@@ -26,7 +26,7 @@
 
 use super::{
     AccountError, Accounts, AuditAction, Client, DeviceState, NewDevice, NewSession, Result,
-    limits, sessions,
+    limits, new_account_id, sessions,
 };
 use crate::mail::{self, Kind, Mail};
 use sqlx::{Postgres, Transaction};
@@ -517,7 +517,7 @@ impl Accounts {
             "INSERT INTO accounts (id, email, password_file, email_verified_at)
              VALUES ($1, $2, $3, now()) ON CONFLICT (email) DO NOTHING RETURNING id",
         )
-        .bind(Uuid::new_v4())
+        .bind(new_account_id()?)
         .bind(&email)
         .bind(&password_file)
         .fetch_optional(&mut *tx)

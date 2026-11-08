@@ -162,6 +162,17 @@ pub struct TrustedStart {
 /// How far a trusted start's time may be from the server's clock.
 const TRUSTED_START_WINDOW_SECS: i64 = 300;
 
+/// A new account's id: 16 bytes from the operating system's CSPRNG, as a version-4 UUID. It takes
+/// no argument, so it cannot be derived from an email or anything else; the id of one account
+/// says nothing about another, and cannot be guessed. The id is public to anyone who knows the
+/// account's service public key (it is named in the certification in the key service's log), and
+/// the tombstone status endpoint takes one, which is why it must stay unguessable.
+pub(crate) fn new_account_id() -> Result<Uuid> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| AccountError::Internal)?;
+    Ok(uuid::Builder::from_random_bytes(bytes).into_uuid())
+}
+
 fn unix_now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1121,5 +1132,66 @@ mod signup_default_tests {
     async fn opening_sign_up_is_only_by_asking() {
         let service = Accounts::new(pool(), secrets()).with_signup(SignupMode::Open);
         assert_eq!(service.signup, SignupMode::Open);
+    }
+}
+
+#[cfg(test)]
+mod account_id_tests {
+    use super::*;
+
+    #[test]
+    fn account_ids_are_random_version_4_uuids_and_never_repeat() {
+        let ids: Vec<Uuid> = (0..4096).map(|_| new_account_id().expect("id")).collect();
+        for id in &ids {
+            assert_eq!(id.get_version_num(), 4);
+            assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
+        }
+        let distinct: std::collections::BTreeSet<_> = ids.iter().collect();
+        assert_eq!(distinct.len(), ids.len(), "no id repeated");
+        // Every one of the 122 random bits is set about half the time: nothing constant, no
+        // counter, no clock in them. (4096 draws: a bit's count is within 6 standard deviations,
+        // 2048 +/- 192, for a fair source; a fixed or time-ordered bit is far outside it.)
+        let mut ones = [0u32; 128];
+        for id in &ids {
+            for (i, byte) in id.as_bytes().iter().enumerate() {
+                for bit in 0..8 {
+                    ones[i * 8 + bit] += u32::from((byte >> (7 - bit)) & 1);
+                }
+            }
+        }
+        for (position, count) in ones.iter().enumerate() {
+            // Bits 48..52 are the version and 64..66 the variant.
+            if (48..52).contains(&position) || (64..66).contains(&position) {
+                continue;
+            }
+            assert!(
+                (1856..=2240).contains(count),
+                "bit {position} was set {count} times of 4096"
+            );
+        }
+    }
+
+    /// The id comes from `new_account_id()` and the sign-up path has nothing else to make one
+    /// from: the function takes no input, and the one place an account row is inserted binds it.
+    #[test]
+    fn the_sign_up_binds_a_fresh_random_id_and_derives_none_from_the_address() {
+        let source = include_str!("email.rs");
+        assert!(
+            source.contains(".bind(new_account_id()?)"),
+            "the account row's id is new_account_id()"
+        );
+        for derived in [
+            "Uuid::new_v5",
+            "Uuid::new_v3",
+            "Uuid::from_bytes(",
+            "Uuid::from_u128",
+            "Uuid::now_v7",
+            "Uuid::new_v7",
+        ] {
+            assert!(
+                !source.contains(derived),
+                "sign-up must not make an id with {derived}"
+            );
+        }
     }
 }

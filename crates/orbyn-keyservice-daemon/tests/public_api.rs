@@ -658,10 +658,10 @@ async fn no_answer_carries_an_account_id_and_unknown_and_known_keys_have_one_sha
     ] {
         let (status, _, body) = served.get(&path).await;
         assert_eq!(status, StatusCode::OK, "{path}");
-        // The certification a log entry carries is the signed statement, and that names the
-        // account id (the certified fact is "this account has this key"). So the id is in the
-        // canonical `entry` bytes of the one chain a holder of the service public key can fetch,
-        // and nowhere else: not in the head, a proof, a key list or any other field.
+        // Anyone who knows an account's service public key can read that account's log entries,
+        // which include its internal account id (the signed certification names it). So the id
+        // is in the canonical `entry` bytes of that chain and in no other field: not in the head,
+        // a proof, a key list or any other answer.
         let id = hex(&[1u8; 16]);
         let mut outside = body.clone();
         strip_entries(&mut outside);
