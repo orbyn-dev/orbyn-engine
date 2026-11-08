@@ -35,7 +35,8 @@ const MAX_ATTEMPTS: i32 = 200;
 /// What a message says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// The six-digit code that proves an address, after sign-up or when asked for again.
+    /// The 8-character code that proves an address (`K7QMR4TW`; shown as `K7QM-R4TW`), after
+    /// sign-up or when asked for again.
     VerifyEmail,
     /// Sent to an address that already has an account when someone signs up with it.
     SignUpAttempt,
@@ -317,9 +318,13 @@ impl Sender for LogOnly {
 /// frame `em-ops-log-codes`).
 pub const LOG_CODES_WARNING: &str = "ORBYN_MAIL=log-codes: codes are written to this log with the address they belong to, and no email is sent. This is for staging only.";
 
-/// The line logged with each verification code in `log-codes` mode (Account Designs v55).
+/// The line logged with each verification code in `log-codes` mode (Account Designs v62, frame
+/// `em-ops-log-codes`): the code in its two groups, as the email shows it.
 pub fn staging_code_line(code: &str, to: &str) -> String {
-    format!("staging only, not emailed: code {code} for {to}")
+    format!(
+        "staging only, not emailed: code {} for {to}",
+        crate::email_code::grouped(code)
+    )
 }
 
 /// **Staging only** (`ORBYN_MAIL=log-codes`): logs each verification code with the address it
@@ -880,17 +885,17 @@ mod tests {
             "ORBYN_MAIL=log-codes: codes are written to this log with the address they belong to, and no email is sent. This is for staging only."
         );
         assert_eq!(
-            staging_code_line("482913", "sam@example.com"),
-            "staging only, not emailed: code 482913 for sam@example.com"
+            staging_code_line("K7QMR4TW", "sam@example.com"),
+            "staging only, not emailed: code K7QM-R4TW for sam@example.com"
         );
     }
 
     #[tokio::test]
     async fn log_codes_writes_the_code_and_the_address_as_a_warning_and_nothing_else() {
-        let text = logged(&LogCodes, &verify("482913", "sam@example.com")).await;
+        let text = logged(&LogCodes, &verify("K7QMR4TW", "sam@example.com")).await;
         assert_eq!(
             text.trim_end(),
-            " WARN orbyn_core::mail: staging only, not emailed: code 482913 for sam@example.com"
+            " WARN orbyn_core::mail: staging only, not emailed: code K7QM-R4TW for sam@example.com"
         );
         // Messages that are not a verification code are logged as not sent: a link or a token
         // never reaches the log, and neither does the address.

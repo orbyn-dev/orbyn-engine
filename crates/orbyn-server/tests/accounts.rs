@@ -3000,10 +3000,10 @@ fn normalized(email: &str) -> String {
 
 /// A code that is not the one sent.
 fn other_than(code: &str) -> String {
-    if code == "000000" {
-        "000001".into()
+    if code == "22222222" {
+        "33333333".into()
     } else {
-        "000000".into()
+        "22222222".into()
     }
 }
 
@@ -3147,10 +3147,7 @@ async fn sign_up_makes_no_account_and_no_session_until_the_code_is_verified() {
     assert_eq!(accounts_with(&server, &email).await, 0);
     assert_eq!(real_rows(&server, &email).await, 1);
     let code = server.code_for(&email).await;
-    assert!(
-        code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()),
-        "{code}"
-    );
+    assert!(orbyn_core::email_code::is_code(&code), "{code}");
     // The queued message holds neither the code nor the address in the clear.
     let signup = pending["signup_id"].as_str().expect("id");
     let queued: Vec<String> = orbyn_core::sqlx::query_scalar(
@@ -3366,7 +3363,7 @@ async fn a_taken_address_gets_an_answer_of_the_same_shape_and_its_owner_a_messag
         ),
         (1, 0)
     );
-    for code in ["000000", "123456", "999999"] {
+    for code in ["22222222", "K7QM-R4TW", "zzzzzzzz"] {
         assert_eq!(
             server.verify(&taken["signup_id"], code).await,
             refused(),
@@ -3391,10 +3388,10 @@ async fn a_taken_address_gets_an_answer_of_the_same_shape_and_its_owner_a_messag
         notices_before + 1
     );
     // An id that is not even a UUID, or that nobody made, is refused the same way.
-    assert_eq!(server.verify(&json!("nope"), "123456").await, refused());
+    assert_eq!(server.verify(&json!("nope"), "22222222").await, refused());
     assert_eq!(
         server
-            .verify(&json!(Uuid::new_v4().to_string()), "123456")
+            .verify(&json!(Uuid::new_v4().to_string()), "22222222")
             .await,
         refused()
     );
@@ -3980,7 +3977,7 @@ async fn every_verification_failure_looks_alike_for_any_id_even_when_a_limit_is_
     let (real2, code2) = start_with_code(&server, &other_email).await;
     let ip = ip_in(12, 1);
     for _ in 0..8 {
-        let answer = verify_from(&server, ip, &json!(Uuid::new_v4().to_string()), "000000").await;
+        let answer = verify_from(&server, ip, &json!(Uuid::new_v4().to_string()), "22222222").await;
         assert_eq!(answer, refused());
     }
     assert_eq!(verify_from(&server, ip, &real2, &code2).await, refused());
@@ -4525,11 +4522,12 @@ async fn the_guess_budget_is_the_same_for_the_ids_of_a_free_address_and_a_taken_
     for n in 0..13u8 {
         let ip = ip_in(170 + n, 1);
         let m = trace.lock().expect("trace").len();
-        free_answers.push(verify_from(&server, ip, &free_ids[usize::from(n % 2)], "000001").await);
+        free_answers
+            .push(verify_from(&server, ip, &free_ids[usize::from(n % 2)], "33333333").await);
         free_steps.push(steps_since(&trace, m));
         let m = trace.lock().expect("trace").len();
         taken_answers
-            .push(verify_from(&server, ip, &taken_ids[usize::from(n % 2)], "000001").await);
+            .push(verify_from(&server, ip, &taken_ids[usize::from(n % 2)], "33333333").await);
         taken_steps.push(steps_since(&trace, m));
     }
     assert_eq!(free_answers, taken_answers, "the same answer every time");
@@ -4620,7 +4618,7 @@ async fn every_sign_up_answer_takes_at_least_the_response_floor_whatever_the_out
         timed("a start", started);
         let id = body["signup_id"].clone();
         let started = std::time::Instant::now();
-        assert_eq!(server.verify(&id, "000000").await, refused());
+        assert_eq!(server.verify(&id, "22222222").await, refused());
         timed("a wrong code", started);
         let started = std::time::Instant::now();
         assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
@@ -4630,7 +4628,7 @@ async fn every_sign_up_answer_takes_at_least_the_response_floor_whatever_the_out
     let started = std::time::Instant::now();
     assert_eq!(
         server
-            .verify(&json!(Uuid::new_v4().to_string()), "000000")
+            .verify(&json!(Uuid::new_v4().to_string()), "22222222")
             .await,
         refused()
     );
@@ -4673,7 +4671,7 @@ fn ceiling_policy() -> orbyn_core::accounts::SignupPolicy {
 async fn spend_the_code(server: &Server, id: &Value, prefix: u8) {
     for p in [prefix, prefix + 1] {
         for host in 1..=5 {
-            verify_from(server, ip_in(p, host), id, "000000").await;
+            verify_from(server, ip_in(p, host), id, "22222222").await;
         }
     }
 }
@@ -4943,6 +4941,48 @@ async fn a_proof_is_not_spent_on_a_start_the_hard_cap_refuses() {
         .await
         .expect("clear the cap");
     assert_eq!(start(email(), Some(proof)).await.0, StatusCode::CREATED);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_code_may_be_typed_in_any_case_with_a_hyphen_or_spaces_and_is_eight_symbols_of_the_alphabet()
+ {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let email = email();
+    let (id, code) = start_with_code(&server, &email).await;
+    // Mailed whole: 8 symbols, none of 0, 1, O, I, L or U.
+    assert!(orbyn_core::email_code::is_code(&code), "{code}");
+    assert!(code.bytes().all(|b| !b"01OILU".contains(&b)));
+    // Wrong in every way a person can get it wrong, each refused the same: another code, a code
+    // with a character changed, one too short, one too long, one with an O for the 0 it never has.
+    let mut nearly = code.clone().into_bytes();
+    nearly[7] = if nearly[7] == b'2' { b'3' } else { b'2' };
+    for wrong in [
+        other_than(&code),
+        String::from_utf8(nearly).expect("ascii"),
+        code[..7].to_owned(),
+        format!("{code}2"),
+        code.replace('2', "O"),
+        "K7QM-R4T0".into(),
+    ] {
+        if wrong == code {
+            continue;
+        }
+        assert_eq!(
+            verify_from(&server, ip_in(190, 1), &id, &wrong).await,
+            refused(),
+            "{wrong}"
+        );
+    }
+    // The right code, typed with lower case, a hyphen in the middle and spaces round it.
+    let typed = format!(
+        " {}-{}  ",
+        code[..4].to_lowercase(),
+        code[4..].to_lowercase()
+    );
+    let (status, session) = server.verify(&id, &typed).await;
+    assert_eq!(status, StatusCode::CREATED, "{session}");
 }
 
 // ---- Deleting an account ----
@@ -8965,7 +9005,7 @@ async fn a_decoy_never_uses_up_an_invite_and_looks_like_a_real_sign_up() {
         "a decoy records the invite too, so it takes the same steps"
     );
     // Whatever code is tried, it fails as it always did, and the invite is not touched.
-    let (status, body) = server.verify(&decoy["signup_id"], "123456").await;
+    let (status, body) = server.verify(&decoy["signup_id"], "22222222").await;
     assert_eq!(
         (status, body["code"].clone()),
         (StatusCode::BAD_REQUEST, json!("invalid_email_code"))

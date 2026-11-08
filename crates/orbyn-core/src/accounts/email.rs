@@ -13,7 +13,7 @@
 //!   oldest, so a start never fails and nobody needs room to be made for them.
 //! - **One code per address, derived, not stored.** An address with a live pending sign-up has
 //!   one code record: a random salt, an expiry (30 minutes), when it was last mailed and how many
-//!   wrong guesses it has had **in its whole life**. The six-digit code is derived from the server
+//!   wrong guesses it has had **in its whole life**. The 8-character code is derived from the server
 //!   secret, the address and the salt, so it can be mailed again without being kept anywhere.
 //! - **Any start or resend re-sends the active code**, at most once a minute per address (the
 //!   mail is the same code, so skipping one loses nothing), and **a new code is made only when the
@@ -65,10 +65,10 @@ fn random_salt() -> Result<[u8; 16]> {
 }
 
 impl Accounts {
-    /// The six-digit code of an address's code record. Derived from the server secret, so it can
-    /// be mailed again without being stored; `label` separates the code that is mailed from the
-    /// one a taken address's decoy compares against, which is never mailed. Uniform over a million
-    /// by rejection.
+    /// The code of an address's code record: 8 symbols of the 30-symbol alphabet of
+    /// [`crate::email_code`]. Derived from the server secret, so it can be mailed again without
+    /// being stored; `label` separates the code that is mailed from the one a taken address's decoy
+    /// compares against, which is never mailed. Uniform over the 30^8 codes by rejection.
     fn signup_code(&self, label: &str, email: &str, salt: &[u8]) -> String {
         let mut counter = 0u32;
         loop {
@@ -77,10 +77,9 @@ impl Accounts {
             data.extend_from_slice(salt);
             data.extend_from_slice(&counter.to_be_bytes());
             let digest = self.secrets.digest(label, &data);
-            let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-            // The largest multiple of a million that fits; above it the remainder would be skewed.
-            if n < 4_294_000_000 {
-                return format!("{:06}", n % 1_000_000);
+            // 32 bytes make 8 symbols all but always; when too many are skipped, the next block.
+            if let Some(code) = crate::email_code::from_bytes(&digest) {
+                return code;
             }
             counter += 1;
         }
@@ -536,7 +535,7 @@ impl Accounts {
         .fetch_optional(&mut *tx)
         .await?;
         let (salt, wrong) = record.ok_or(AccountError::InvalidEmailCode)?;
-        let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+        let code = crate::email_code::normalise(code);
         self.step("compare");
         // A decoy compares against a code that was never mailed; a dead code (10 wrong guesses
         // in its life) matches nothing. All three take this same comparison.

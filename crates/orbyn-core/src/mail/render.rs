@@ -78,13 +78,9 @@ fn short_date(at: DateTime<Utc>) -> String {
     at.format("%-d %B").to_string()
 }
 
-/// "482 913" for a six-digit code; any other code as it is.
+/// "K7QM-R4TW" for a sign-up code; any other text as it is.
 fn spaced(code: &str) -> String {
-    if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) {
-        format!("{} {}", &code[..3], &code[3..])
-    } else {
-        code.to_owned()
-    }
+    crate::email_code::grouped(code)
 }
 
 /// The host of a link, for "check your devices at <host>".
@@ -110,6 +106,7 @@ fn escape(text: &str) -> String {
 // ---- the three emails ----
 
 fn code_email(code: &str) -> Rendered {
+    let code = spaced(code);
     let subject = format!("Your Orbyn code is {code}");
     let text = format!(
         "Your Orbyn code is {code}\n\n\
@@ -121,7 +118,7 @@ fn code_email(code: &str) -> Rendered {
     let mut html = Html::new(&subject);
     html.heading("Your code");
     html.paragraph("Use this code to finish creating your Orbyn account.");
-    html.code(&spaced(code));
+    html.code(&code);
     html.paragraph("It works for 30 minutes.");
     html.quiet("Didn’t try to create an Orbyn account? You can ignore this email. No account is created without the code.");
     Rendered {
@@ -451,13 +448,14 @@ mod tests {
 
     #[test]
     fn the_code_email_is_as_designed() {
-        let r = rendered(Kind::VerifyEmail, "482913");
-        assert_eq!(r.subject, "Your Orbyn code is 482913");
+        // The code is mailed whole and shown in two groups, in the subject and the body alike.
+        let r = rendered(Kind::VerifyEmail, "K7QMR4TW");
+        assert_eq!(r.subject, "Your Orbyn code is K7QM-R4TW");
         assert_eq!(
             r.text,
             format!(
-                "Your Orbyn code is 482913\n\n\
-                 Use this code to finish creating your Orbyn account:\n\n    482913\n\n\
+                "Your Orbyn code is K7QM-R4TW\n\n\
+                 Use this code to finish creating your Orbyn account:\n\n    K7QM-R4TW\n\n\
                  It works for 30 minutes.\n\n\
                  Didn't try to create an Orbyn account? You can ignore\n\
                  this email. No account is created without the code.\n\n{FOOTER_LINES}"
@@ -469,12 +467,13 @@ mod tests {
             r.html
                 .contains("Use this code to finish creating your Orbyn account.")
         );
-        assert!(r.html.contains(">482 913</p>"), "spaced in the body");
+        assert!(r.html.contains(">K7QM-R4TW</p>"), "grouped in the body");
+        assert!(!r.html.contains("K7QMR4TW"), "never whole");
         assert!(r.html.contains("It works for 30 minutes."));
         assert!(r.html.contains("Didn’t try to create an Orbyn account? You can ignore this email. No account is created without the code."));
         assert!(!r.html.contains("<a "), "no button on a code email");
         assert!(remote_things(&r.html).is_empty());
-        // The subject keeps the code whole; only the body spaces it. Another length is not spaced.
+        // Only a code is grouped; any other text is shown as it is.
         assert!(
             rendered(Kind::VerifyEmail, "1234")
                 .html
@@ -651,10 +650,10 @@ mod tests {
 
     #[test]
     fn debug_shows_sizes_and_never_the_code_or_the_token() {
-        let code = rendered(Kind::VerifyEmail, "482913");
+        let code = rendered(Kind::VerifyEmail, "K7QMR4TW");
         let shown = format!("{code:?}");
         assert!(
-            !shown.contains("482913") && !shown.contains("Orbyn"),
+            !shown.contains("K7QM") && !shown.contains("Orbyn"),
             "{shown}"
         );
         let link = "https://account.orbyn.dev/cancel-deletion#TOKENTOKEN";

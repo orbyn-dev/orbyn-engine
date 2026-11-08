@@ -604,13 +604,13 @@ mod tests {
             kind: orbyn_core::mail::Kind::VerifyEmail,
             account: None,
             to: "sam@example.com".to_owned(),
-            code: Some("482913".to_owned()),
+            code: Some("K7QMR4TW".to_owned()),
         };
         mailer.sender.send(&mail).await.expect("sent");
         let all = String::from_utf8_lossy(&logs.0.lock().expect("lock")).into_owned();
         assert!(
             all.contains(
-                "WARN orbyn_core::mail: staging only, not emailed: code 482913 for sam@example.com"
+                "WARN orbyn_core::mail: staging only, not emailed: code K7QM-R4TW for sam@example.com"
             ),
             "{all}"
         );
