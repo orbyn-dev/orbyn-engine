@@ -47,6 +47,17 @@ const MAX_ROWS_PER_ADDRESS: i64 = 20;
 /// How long a proof-of-work challenge is good for: the current ten minutes and the ten before.
 const POW_BUCKET_SECS: u64 = 10 * 60;
 
+/// What the address's code record says, read under the address lock.
+#[derive(sqlx::FromRow)]
+struct CodeRecord {
+    salt: Vec<u8>,
+    live: bool,
+    due: bool,
+    spent: bool,
+    spent_in_window: i32,
+    gap_over: bool,
+}
+
 fn random_salt() -> Result<[u8; 16]> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| AccountError::Internal)?;
@@ -86,6 +97,14 @@ impl Accounts {
         self.secrets.digest("signup-pow", &data)
     }
 
+    /// The 428 a client at this prefix is answered while it has no free starts left.
+    fn ask(&self, prefix: &[u8; 32]) -> AccountError {
+        AccountError::ProofRequired {
+            challenge: orbyn_hex(&self.pow_challenge(prefix, self.now() / POW_BUCKET_SECS)),
+            bits: self.policy.pow_bits,
+        }
+    }
+
     /// Limits a sign-up start by its client prefix alone (see the module docs). Runs before any
     /// transaction opens, takes the same slots for every address, and says nothing about one.
     pub(super) async fn throttle_start(
@@ -102,27 +121,41 @@ impl Accounts {
             self.limits.signup_start_free_per_prefix,
         )
         .await?;
+        // Past the free starts a proof is needed. It is checked here and spent below, only on a
+        // start the hard cap lets through.
+        let mut spent_proof: Option<([u8; 32], u32)> = None;
         if !within_free {
-            let now_bucket = self.now() / POW_BUCKET_SECS;
-            let bits = self.policy.pow_bits;
-            let ask = || AccountError::ProofRequired {
-                challenge: orbyn_hex(&self.pow_challenge(&prefix, now_bucket)),
-                bits,
-            };
             let Some((challenge, nonce)) = proof else {
-                return Err(ask());
+                return Err(self.ask(&prefix));
             };
             let Some(given) = unhex32(challenge) else {
-                return Err(ask());
+                return Err(self.ask(&prefix));
             };
+            let now_bucket = self.now() / POW_BUCKET_SECS;
             // The current ten minutes or the ten before (a client may be slow, or cross the edge).
             let current: bool = given.ct_eq(&self.pow_challenge(&prefix, now_bucket)).into();
             let before: bool = given
                 .ct_eq(&self.pow_challenge(&prefix, now_bucket.saturating_sub(1)))
                 .into();
-            if !(current || before) || !orbyn_crypto::pow::verify(&given, nonce, bits) {
-                return Err(ask());
+            if !(current || before)
+                || !orbyn_crypto::pow::verify(&given, nonce, self.policy.pow_bits)
+            {
+                return Err(self.ask(&prefix));
             }
+            spent_proof = Some((given, nonce));
+        }
+        // The hard cap first: a proof is spent only on a start that is let through.
+        let within_max = limits::allow(
+            &self.pool,
+            "signup-start-max",
+            &prefix,
+            self.limits.signup_start_max_per_prefix,
+        )
+        .await?;
+        if !within_max {
+            return Err(AccountError::TooManyAttempts);
+        }
+        if let Some((given, nonce)) = spent_proof {
             // A solution buys one start.
             let mut used = given.to_vec();
             used.extend_from_slice(&nonce.to_be_bytes());
@@ -134,18 +167,10 @@ impl Accounts {
             )
             .await?;
             if !fresh {
-                return Err(ask());
+                // Replayed: this start does not count against the cap either.
+                limits::give_back(&self.pool, "signup-start-max", &prefix).await?;
+                return Err(self.ask(&prefix));
             }
-        }
-        let within_max = limits::allow(
-            &self.pool,
-            "signup-start-max",
-            &prefix,
-            self.limits.signup_start_max_per_prefix,
-        )
-        .await?;
-        if !within_max {
-            return Err(AccountError::TooManyAttempts);
         }
         Ok(())
     }
@@ -192,26 +217,68 @@ impl Accounts {
         for_id: Uuid,
     ) -> Result<()> {
         self.step("code-record");
-        let live: Option<(Vec<u8>, bool)> = sqlx::query_as(
-            "SELECT salt, mailed_at <= now() - make_interval(secs => $3::float8)
-             FROM signup_codes
-             WHERE email = $1 AND expires_at > now() AND wrong_guesses < $2 FOR UPDATE",
+        let record: Option<CodeRecord> = sqlx::query_as(
+            "SELECT salt,
+                    expires_at > now() AND wrong_guesses < $2 AS live,
+                    mailed_at <= now() - make_interval(secs => $3::float8) AS due,
+                    wrong_guesses > 0 AS spent,
+                    CASE WHEN spent_window_start > now() - interval '24 hours'
+                         THEN spent_count ELSE 0 END AS spent_in_window,
+                    (last_spent_at IS NULL
+                     OR last_spent_at <= now() - make_interval(secs => $4::float8)) AS gap_over
+             FROM signup_codes WHERE email = $1 FOR UPDATE",
         )
         .bind(email)
         .bind(MAX_WRONG_PER_CODE)
         .bind(self.policy.mail_pace.as_secs_f64())
+        .bind(self.policy.spent_gap.as_secs_f64())
         .fetch_optional(&mut **tx)
         .await?;
-        let (salt, send) = match live {
-            Some((salt, due)) => (salt, due),
+        let (salt, send) = match record {
+            // The active code: mailed again if the last mail is old enough.
+            Some(r) if r.live => (r.salt, r.due),
+            // A code that expired or died. A new one is made only when the last mail is a pace
+            // old (so mail stays bounded) and, if the old one was spent by wrong guesses, when the
+            // address has not had more than `spent_free` of them replaced in the day or the last
+            // replacement is a gap old. Otherwise nothing is made now: the start still works and
+            // the next one after the delay makes it. A delay, never a refusal.
+            Some(r) => {
+                let budget = !r.spent
+                    || r.spent_in_window
+                        < i32::try_from(self.policy.spent_free).unwrap_or(i32::MAX)
+                    || r.gap_over;
+                if r.due && budget {
+                    let salt = random_salt()?.to_vec();
+                    sqlx::query(
+                        "UPDATE signup_codes
+                         SET salt = $2, expires_at = now() + make_interval(mins => $3),
+                             mailed_at = now(), wrong_guesses = 0,
+                             spent_count = CASE WHEN $4 THEN $5 + 1 ELSE spent_count END,
+                             spent_window_start = CASE
+                                 WHEN NOT $4 THEN spent_window_start
+                                 WHEN spent_window_start > now() - interval '24 hours'
+                                     THEN spent_window_start
+                                 ELSE now() END,
+                             last_spent_at = CASE WHEN $4 THEN now() ELSE last_spent_at END
+                         WHERE email = $1",
+                    )
+                    .bind(email)
+                    .bind(&salt)
+                    .bind(SIGNUP_MINUTES)
+                    .bind(r.spent)
+                    .bind(r.spent_in_window)
+                    .execute(&mut **tx)
+                    .await?;
+                    (salt, true)
+                } else {
+                    (r.salt, false)
+                }
+            }
             None => {
                 let salt = random_salt()?.to_vec();
                 sqlx::query(
                     "INSERT INTO signup_codes (email, salt, expires_at, mailed_at, wrong_guesses)
-                     VALUES ($1, $2, now() + make_interval(mins => $3), now(), 0)
-                     ON CONFLICT (email) DO UPDATE
-                     SET salt = $2, expires_at = now() + make_interval(mins => $3),
-                         mailed_at = now(), wrong_guesses = 0",
+                     VALUES ($1, $2, now() + make_interval(mins => $3), now(), 0)",
                 )
                 .bind(email)
                 .bind(&salt)
@@ -275,10 +342,14 @@ impl Accounts {
         .bind(MAX_ROWS_PER_PREFIX - 1)
         .execute(&mut *tx)
         .await?;
+        // Rows younger than a quarter of an hour are never evicted by the address's cap, so
+        // twenty quick starts from other prefixes cannot push out the row of an owner who started
+        // a moment ago (the address may hold more than twenty for that long).
         sqlx::query(
             "DELETE FROM pending_signups WHERE id IN (
                  SELECT id FROM pending_signups WHERE email = $1
-                 ORDER BY created_at DESC, id OFFSET $2)",
+                 ORDER BY created_at DESC, id OFFSET $2)
+             AND created_at < now() - interval '15 minutes'",
         )
         .bind(email)
         .bind(MAX_ROWS_PER_ADDRESS - 1)

@@ -3068,6 +3068,9 @@ fn test_policy() -> orbyn_core::accounts::SignupPolicy {
         mail_pace: Duration::ZERO,
         response_floor: Duration::ZERO,
         pow_bits: 8,
+        // The ceiling on replacing spent codes is its own tests' business.
+        spent_free: 1_000_000,
+        spent_gap: Duration::ZERO,
     }
 }
 
@@ -3566,14 +3569,23 @@ async fn rows_are_capped_per_prefix_and_per_address_and_a_newer_start_evicts_the
         }
     };
     assert!(!alive(&ids[3]).await && alive(&ids[4]).await && alive(&ids[5]).await);
-    // The address holds twenty in all, whichever prefixes they came from; the oldest go first,
-    // and an owner who started first is evicted only by twenty newer rows from ten prefixes.
+    // The address holds twenty in all, whichever prefixes they came from, and the oldest go first;
+    // a row younger than a quarter of an hour is never evicted by the address's cap, so for that
+    // long the address can hold more (another test), and the cap is applied once rows have aged.
     let (_, owner) = start(ip_in(80, 1)).await;
     for prefix in 81..=90u8 {
         for host in 1..=2 {
             assert_eq!(start(ip_in(prefix, host)).await.0, StatusCode::CREATED);
         }
     }
+    orbyn_core::sqlx::query(
+        "UPDATE pending_signups SET created_at = created_at - interval '20 minutes' WHERE email = $1",
+    )
+    .bind(normalized(&email))
+    .execute(server.db.pool())
+    .await
+    .expect("age");
+    start(ip_in(91, 1)).await;
     assert_eq!(rows(&server, &email).await, 20);
     assert!(!alive(&owner["signup_id"]).await, "the oldest went");
     // Rows are never decoys here (the address is free), and an expired row does not count.
@@ -3684,8 +3696,9 @@ async fn a_start_waits_for_the_address_lock_and_then_counts_what_was_added_meanw
             orbyn_core::sqlx::query(
                 "INSERT INTO pending_signups
                      (id, email, decoy, password_file, device_name, device_platform,
-                      device_signing_key, device_agreement_key, expires_at)
-                 VALUES ($1, $2, false, decode('00', 'hex'), 'Laptop', 'web', $3, $3, now() + interval '30 minutes')",
+                      device_signing_key, device_agreement_key, expires_at, created_at)
+                 VALUES ($1, $2, false, decode('00', 'hex'), 'Laptop', 'web', $3, $3,
+                         now() + interval '30 minutes', now() - interval '1 hour')",
             )
             .bind(Uuid::new_v4())
             .bind(&norm)
@@ -3842,7 +3855,7 @@ async fn a_new_a_taken_and_a_pending_address_answer_every_start_alike_and_only_t
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
-async fn a_start_mails_the_active_code_again_only_after_the_pace_and_a_dead_code_at_once() {
+async fn a_start_mails_the_active_code_again_only_after_the_pace_and_so_does_a_new_one() {
     let _turn = TURN.lock().await;
     let server = server_policy(
         generous(),
@@ -3892,13 +3905,29 @@ async fn a_start_mails_the_active_code_again_only_after_the_pace_and_a_dead_code
         .await;
     assert_eq!(sent(&server, &norm).await, 2);
     assert_eq!(server.code_for(&email).await, code);
-    // A code that has died is replaced at once, the pace notwithstanding: nobody waits to be able
-    // to sign up because someone burned the code.
+    // A code that has died is replaced like any other make: not before the pace, which keeps the
+    // mail an address gets to one a minute, and then at once.
     orbyn_core::sqlx::query("UPDATE signup_codes SET wrong_guesses = 10 WHERE email = $1")
         .bind(&norm)
         .execute(server.db.pool())
         .await
         .expect("kill");
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET mailed_at = now() - interval '10 seconds' WHERE email = $1",
+    )
+    .bind(&norm)
+    .execute(server.db.pool())
+    .await
+    .expect("recent");
+    assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(sent(&server, &norm).await, 2, "nothing inside the minute");
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET mailed_at = now() - interval '61 seconds' WHERE email = $1",
+    )
+    .bind(&norm)
+    .execute(server.db.pool())
+    .await
+    .expect("age");
     assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
     assert_eq!(sent(&server, &norm).await, 3);
     let fresh = server.code_for(&email).await;
@@ -4628,6 +4657,292 @@ async fn every_sign_up_answer_takes_at_least_the_response_floor_whatever_the_out
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     timed("a bad address", started);
+}
+
+/// What the pacing is for the tests of the ceiling on replacing spent codes: nothing is paced
+/// except that, and the ceiling is the production one (3 at once, then one an hour).
+fn ceiling_policy() -> orbyn_core::accounts::SignupPolicy {
+    orbyn_core::accounts::SignupPolicy {
+        spent_free: 3,
+        spent_gap: Duration::from_secs(3600),
+        ..test_policy()
+    }
+}
+
+/// Spends the address's current code: ten wrong guesses from two prefixes.
+async fn spend_the_code(server: &Server, id: &Value, prefix: u8) {
+    for p in [prefix, prefix + 1] {
+        for host in 1..=5 {
+            verify_from(server, ip_in(p, host), id, "000000").await;
+        }
+    }
+}
+
+async fn code_mails(server: &Server, norm: &str) -> usize {
+    server.mailbox().await.count(norm, Kind::VerifyEmail)
+}
+
+async fn expire_the_code(server: &Server, norm: &str) {
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET expires_at = now() - interval '1 second' WHERE email = $1",
+    )
+    .bind(norm)
+    .execute(server.db.pool())
+    .await
+    .expect("expire");
+}
+
+async fn code_record(server: &Server, email: &str) -> (i32, i32) {
+    orbyn_core::sqlx::query_as::<_, (i32, i32)>(
+        "SELECT wrong_guesses, spent_count FROM signup_codes WHERE email = $1",
+    )
+    .bind(normalized(email))
+    .fetch_one(server.db.pool())
+    .await
+    .expect("record")
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn spent_codes_are_replaced_at_once_three_times_a_day_and_then_one_an_hour_never_refused() {
+    let _turn = TURN.lock().await;
+    // Reviewer 26 on engine#97: a dead code was replaced by the next start, so an address had no
+    // ceiling on guesses however many prefixes they came from.
+    let server = server_policy(generous(), ceiling_policy()).await;
+    let email = email();
+    let norm = normalized(&email);
+    let (id, mut code) = start_with_code(&server, &email).await;
+    // The first three spent codes are replaced as soon as the owner or anyone asks.
+    for round in 1..=3 {
+        spend_the_code(&server, &id, 10 * round as u8).await;
+        assert_eq!(
+            verify_from(&server, ip_in(99, 1), &id, &code).await,
+            refused(),
+            "round {round}: the spent code is dead, the right one included"
+        );
+        assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+        let fresh = server.code_for(&email).await;
+        assert_ne!(fresh, code, "round {round}");
+        code = fresh;
+        assert_eq!(code_record(&server, &email).await, (0, round));
+    }
+    assert_eq!(code_mails(&server, &norm).await, 4);
+    // The fourth is a delay: starts and resends still work and answer the same, but no new code
+    // is made and none is mailed, however many ask and from however many prefixes.
+    spend_the_code(&server, &id, 50).await;
+    for host in 1..=6 {
+        assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+        let upload = server.registration_upload(&email, b"owner").await;
+        let (status, _) = server
+            .register_finish_from(
+                ip_in(60, host),
+                &email,
+                &upload,
+                &DeviceKeys::generate().expect("keys"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "the owner's start still works");
+    }
+    assert_eq!(
+        code_mails(&server, &norm).await,
+        4,
+        "no new code inside the gap"
+    );
+    assert_eq!(
+        verify_from(&server, ip_in(99, 2), &id, &code).await,
+        refused()
+    );
+    assert_eq!(
+        code_record(&server, &email).await.1,
+        3,
+        "and the count did not move"
+    );
+    // When the gap is over the next ask makes it, once.
+    orbyn_core::sqlx::query(
+        "UPDATE signup_codes SET last_spent_at = now() - interval '61 minutes' WHERE email = $1",
+    )
+    .bind(&norm)
+    .execute(server.db.pool())
+    .await
+    .expect("age");
+    assert_eq!(server.resend(&id).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(code_mails(&server, &norm).await, 5);
+    let fresh = server.code_for(&email).await;
+    assert_ne!(fresh, code);
+    assert_eq!(code_record(&server, &email).await, (0, 4));
+    // That is the ceiling: a day holds at most three at once and one each hour after, so ten
+    // guesses a code cannot become more than a few hundred a day at one address.
+    assert_eq!(
+        verify_from(&server, ip_in(99, 3), &id, &fresh).await.0,
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_code_that_expired_with_some_wrong_guesses_counts_as_spent_and_a_clean_one_does_not() {
+    let _turn = TURN.lock().await;
+    let server = server_policy(generous(), ceiling_policy()).await;
+    let email = email();
+    let norm = normalized(&email);
+    let (id, code) = start_with_code(&server, &email).await;
+    // A clean expiry (no guesses) is replaced without counting, as often as it happens.
+    for _ in 0..5 {
+        expire_the_code(&server, &norm).await;
+        server.resend(&id).await;
+    }
+    assert_eq!(code_record(&server, &email).await, (0, 0));
+    // Nine guesses spread over expiries (never ten) still count as spent, so the same ceiling
+    // holds for guessing slowly.
+    let wrong = other_than(&server.code_for(&email).await);
+    for n in 1..=3u8 {
+        verify_from(&server, ip_in(70 + n, 1), &id, &wrong).await;
+        expire_the_code(&server, &norm).await;
+        server.resend(&id).await;
+    }
+    assert_eq!(code_record(&server, &email).await, (0, 3));
+    let _ = code;
+    // The fourth spent expiry is past the three free and inside the gap: no new code.
+    verify_from(&server, ip_in(90, 1), &id, &wrong).await;
+    expire_the_code(&server, &norm).await;
+    let before = server.mailbox().await.count(&norm, Kind::VerifyEmail);
+    server.resend(&id).await;
+    assert_eq!(
+        server.mailbox().await.count(&norm, Kind::VerifyEmail),
+        before,
+        "delayed"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_delay_is_the_same_for_a_taken_address() {
+    let _turn = TURN.lock().await;
+    let server = server_policy(generous(), ceiling_policy()).await;
+    let taken = email();
+    server
+        .register(&taken, b"owner", &DeviceKeys::generate().expect("keys"))
+        .await;
+    let upload = server.registration_upload(&taken, b"intruder").await;
+    let (_, body) = server
+        .register_finish_from(
+            ip_in(100, 1),
+            &taken,
+            &upload,
+            &DeviceKeys::generate().expect("keys"),
+            None,
+        )
+        .await;
+    let id = body["signup_id"].clone();
+    // Spend the (never mailed) code four times: three replaced, the fourth delayed, exactly as for
+    // a free address, so the pattern does not tell them apart.
+    let mut seen = Vec::new();
+    for round in 0..4u8 {
+        spend_the_code(&server, &id, 110 + 3 * round).await;
+        server.resend(&id).await;
+        seen.push(code_record(&server, &taken).await);
+    }
+    assert_eq!(seen, [(0, 1), (0, 2), (0, 3), (10, 3)]);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn young_rows_are_not_evicted_by_the_addresss_cap() {
+    let _turn = TURN.lock().await;
+    // Reviewer 26: twenty newer starts from ten prefixes pushed the owner's row out.
+    let server = server_with(generous()).await;
+    let email = email();
+    let upload = server.registration_upload(&email, b"pw").await;
+    let (_, owner) = server
+        .register_finish_from(
+            ip_in(140, 1),
+            &email,
+            &upload,
+            &DeviceKeys::generate().expect("keys"),
+            None,
+        )
+        .await;
+    for prefix in 141..=160u8 {
+        for host in 1..=2 {
+            server
+                .register_finish_from(
+                    ip_in(prefix, host),
+                    &email,
+                    &upload,
+                    &DeviceKeys::generate().expect("keys"),
+                    None,
+                )
+                .await;
+        }
+    }
+    let alive = count(
+        &server,
+        "SELECT count(*) FROM pending_signups WHERE id::text = $1",
+        owner["signup_id"].as_str().expect("id"),
+    )
+    .await;
+    assert_eq!(alive, 1, "the owner's quarter-hour-old row survived");
+    assert!(
+        rows(&server, &email).await > 20,
+        "the address held more than twenty meanwhile"
+    );
+    // Once rows are older than the quarter hour the cap evicts them again, oldest first.
+    orbyn_core::sqlx::query(
+        "UPDATE pending_signups SET created_at = created_at - interval '20 minutes' WHERE email = $1",
+    )
+    .bind(normalized(&email))
+    .execute(server.db.pool())
+    .await
+    .expect("age");
+    server
+        .register_finish_from(
+            ip_in(170, 1),
+            &email,
+            &upload,
+            &DeviceKeys::generate().expect("keys"),
+            None,
+        )
+        .await;
+    assert_eq!(rows(&server, &email).await, 20);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_proof_is_not_spent_on_a_start_the_hard_cap_refuses() {
+    let _turn = TURN.lock().await;
+    let server = throttled(1, 2).await;
+    let ip = ip_in(180, 1);
+    let keys = || DeviceKeys::generate().expect("keys");
+    let start = |who: String, proof: Option<Value>| {
+        let server = &server;
+        async move {
+            let u = server.registration_upload(&who, b"pw").await;
+            server
+                .register_finish_from(ip, &who, &u, &keys(), proof)
+                .await
+        }
+    };
+    assert_eq!(start(email(), None).await.0, StatusCode::CREATED);
+    let (status, ask) = start(email(), None).await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    let proof = proof_of(&ask);
+    assert_eq!(start(email(), Some(proof)).await.0, StatusCode::CREATED);
+    // The cap is reached. A second proof is asked for and solved, and the cap refuses the start
+    // it was solved for: that proof must still be unspent.
+    let (status, ask) = start(email(), None).await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    let proof = proof_of(&ask);
+    assert_eq!(
+        start(email(), Some(proof.clone())).await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // Free the cap and the unspent proof buys the start it was solved for.
+    orbyn_core::sqlx::query("DELETE FROM auth_attempts WHERE action = 'signup-start-max'")
+        .execute(server.db.pool())
+        .await
+        .expect("clear the cap");
+    assert_eq!(start(email(), Some(proof)).await.0, StatusCode::CREATED);
 }
 
 // ---- Deleting an account ----
@@ -5593,9 +5908,13 @@ async fn a_cancel_that_gets_the_lock_first_beats_the_worker() {
         .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     server.make_due(account).await;
-    assert_eq!(
-        worker.due_for_deletion(100).await.expect("due"),
-        vec![account]
+    // Other accounts in a shared database may be due too: this one is among them.
+    assert!(
+        worker
+            .due_for_deletion(1000)
+            .await
+            .expect("due")
+            .contains(&account)
     );
     let (status, _) = server
         .cancel_deletion(&session, cancel_body(&session, &laptop))

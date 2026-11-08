@@ -10,7 +10,15 @@ CREATE TABLE signup_codes (
     salt          bytea       NOT NULL CHECK (length(salt) = 16),
     expires_at    timestamptz NOT NULL,
     mailed_at     timestamptz NOT NULL DEFAULT now(),
-    wrong_guesses integer     NOT NULL DEFAULT 0 CHECK (wrong_guesses >= 0)
+    wrong_guesses integer     NOT NULL DEFAULT 0 CHECK (wrong_guesses >= 0),
+    -- Codes of this address that were spent (had a wrong guess before they died or expired) in the
+    -- last day: how many, when the day began and when the last one was replaced. A spent code is
+    -- replaced at once for the first few, then one at a time with a gap, so guessing at an address
+    -- has a ceiling a stranger cannot raise by using many IP prefixes, and it is a delay, never a
+    -- refusal: a start always works and the next code comes when the gap is over.
+    spent_count        integer     NOT NULL DEFAULT 0 CHECK (spent_count >= 0),
+    spent_window_start timestamptz,
+    last_spent_at      timestamptz
 );
 CREATE INDEX signup_codes_expiry ON signup_codes (expires_at);
 

@@ -451,6 +451,13 @@ pub struct SignupPolicy {
     pub response_floor: Duration,
     /// Leading zero bits of the proof of work asked past the free allowance of starts.
     pub pow_bits: u32,
+    /// How many spent codes (a code with a wrong guess against it that died or expired) an
+    /// address may have replaced at once in a day. After that a spent code is replaced one at a
+    /// time, `spent_gap` apart. This is what bounds guessing at an address, whatever number of IP
+    /// prefixes the guesses come from; the price is that, while someone keeps spending an
+    /// address's codes, its owner waits for the next one.
+    pub spent_free: u32,
+    pub spent_gap: Duration,
 }
 
 impl Default for SignupPolicy {
@@ -459,6 +466,8 @@ impl Default for SignupPolicy {
             mail_pace: Duration::from_secs(60),
             response_floor: Duration::from_millis(250),
             pow_bits: 18,
+            spent_free: 3,
+            spent_gap: Duration::from_secs(60 * 60),
         }
     }
 }

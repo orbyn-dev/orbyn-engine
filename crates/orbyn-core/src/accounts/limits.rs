@@ -423,7 +423,7 @@ pub async fn prune(pool: &PgPool) -> Result<u64, sqlx::Error> {
         "DELETE FROM pending_signups WHERE id IN (
              SELECT id FROM pending_signups WHERE expires_at < now() LIMIT 5000)",
         "DELETE FROM signup_codes WHERE email IN (
-             SELECT email FROM signup_codes WHERE expires_at < now() LIMIT 5000)",
+             SELECT email FROM signup_codes WHERE expires_at < now() - interval '25 hours' LIMIT 5000)",
         "DELETE FROM devices WHERE id IN (
              SELECT id FROM devices WHERE state = 'pending' AND created_at < now() - interval '7 days' LIMIT 5000)",
     ];
