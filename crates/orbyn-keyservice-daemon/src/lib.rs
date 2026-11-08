@@ -59,9 +59,15 @@ impl Audit for TracingAudit {
 /// How many creates one account may ask for in an hour.
 pub const CREATES_PER_HOUR: u32 = 10;
 
-/// Every limit here counts over one hour, so a `rate_events` row older than this is never read
-/// again. The prune task removes them, for blocks and accounts that never come back.
-pub const RATE_RETENTION_SECS: u64 = 2 * 60 * 60;
+/// The window every limit counts over, in seconds: one hour. The longest any caller uses.
+pub const RATE_WINDOW_SECS: u64 = 60 * 60;
+
+/// A `rate_events` row older than this is never read again (it is twice the longest window). The
+/// prune task removes them, for blocks and accounts that never come back.
+pub const RATE_RETENTION_SECS: u64 = 2 * RATE_WINDOW_SECS;
+
+// Pruning must never forget a request a limit still counts.
+const _: () = assert!(RATE_RETENTION_SECS >= RATE_WINDOW_SECS);
 
 /// How often the prune task runs.
 pub const PRUNE_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);

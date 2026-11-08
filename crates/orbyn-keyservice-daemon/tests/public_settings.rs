@@ -65,3 +65,11 @@ fn a_bad_bind_or_header_is_refused_with_its_own_message_naming_the_setting() {
     // The internal bind's setting is not touched.
     assert_ne!(messages::public_bind_invalid(), messages::bind_invalid());
 }
+
+#[test]
+fn pruning_never_forgets_a_request_a_limit_still_counts() {
+    use orbyn_keyservice_daemon::{RATE_RETENTION_SECS, RATE_WINDOW_SECS};
+    // Every allowance counts over RATE_WINDOW_SECS (one hour); a row is kept at least that long.
+    assert_eq!(RATE_WINDOW_SECS, 3600);
+    assert!(RATE_RETENTION_SECS >= RATE_WINDOW_SECS);
+}

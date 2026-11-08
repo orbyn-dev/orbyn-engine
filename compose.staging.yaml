@@ -40,7 +40,6 @@ services:
       dockerfile: docker/Dockerfile
     image: orbyn-engine:staging
     command: ["migrate"]
-    networks: [ks]
     healthcheck:
       disable: true
     environment:
@@ -183,6 +182,7 @@ services:
     profiles: [smoke]
     entrypoint: ["/usr/local/bin/smoke-entry.sh"]
     command: ["migrate"]
+    networks: [ks]
     environment:
       ORBYN_KEYSERVICE_MIGRATE_DATABASE_URL: postgres://orbyn_ks_owner:${KS_OWNER_PASSWORD:-}@ks-postgres:5432/orbyn_keyservice
       ORBYN_KEYSERVICE_RUNTIME_ROLE: orbyn_ks_runtime

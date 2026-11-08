@@ -28,7 +28,7 @@ use orbyn_translog::service_account_map_key;
 use rustls_pki_types::{CertificateDer, ServerName};
 use webpki::EndEntityCert;
 
-use crate::{AuditEvent, CREATES_PER_HOUR, State};
+use crate::{AuditEvent, CREATES_PER_HOUR, RATE_WINDOW_SECS, State};
 
 /// A client the CA vouches for, by the DNS name in its certificate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,7 +212,12 @@ async fn create<H: Hsm + Send + Sync + 'static>(
     };
     match state
         .store
-        .allow("create-service-key", &account_id, CREATES_PER_HOUR, 3600)
+        .allow(
+            "create-service-key",
+            &account_id,
+            CREATES_PER_HOUR,
+            RATE_WINDOW_SECS,
+        )
         .await
     {
         Ok(true) => {}

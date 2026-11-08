@@ -2472,3 +2472,31 @@ async fn pruning_removes_the_allowance_rows_nobody_will_count_again_and_only_tho
     );
     db.cleanup().await;
 }
+
+#[tokio::test]
+#[ignore = "needs ORBYN_KEYSERVICE_DATABASE_URL"]
+async fn pruning_runs_under_the_stores_timeouts_and_a_stuck_lock_is_a_retryable_error() {
+    let db = TestDb::new().await;
+    let store = db.store().await.with_timeouts(Timeouts {
+        lock: "300ms".to_owned(),
+        statement: "5s".to_owned(),
+    });
+    // The owner holds the table, so a delete cannot get its lock.
+    let mut holder = db.owner.begin().await.expect("begin");
+    sqlx::query("LOCK TABLE rate_events IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *holder)
+        .await
+        .expect("lock");
+    let started = std::time::Instant::now();
+    let result = within(store.prune_rate_events(7200)).await;
+    assert!(matches!(result, Err(StoreError::Busy)), "{result:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    holder.rollback().await.expect("release");
+    // Released, it works.
+    assert_eq!(store.prune_rate_events(7200).await.expect("prune"), 0);
+    db.cleanup().await;
+}

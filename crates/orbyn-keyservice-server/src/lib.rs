@@ -503,11 +503,21 @@ impl Store {
     /// over, or a limit would forget requests it should still count.
     pub async fn prune_rate_events(&self, max_age_secs: u64) -> Result<u64> {
         let age = i64::try_from(max_age_secs).map_err(|_| StoreError::BadEntry)?;
+        // The same bounds a write has: a stuck lock or statement is an error, not a queue.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+        )
+        .bind(&self.timeouts.lock)
+        .bind(&self.timeouts.statement)
+        .execute(&mut *tx)
+        .await?;
         let done =
             sqlx::query("DELETE FROM rate_events WHERE at < now() - make_interval(secs => $1)")
                 .bind(age as f64)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
+        tx.commit().await?;
         Ok(done.rows_affected())
     }
 

@@ -308,7 +308,11 @@ async fn allow(
 ) -> Option<Response> {
     let (action, limit) = allowance.limit();
     let block = address_block(client_address(&state.config, headers, peer));
-    match state.store.allow(action, &block, limit, 3600).await {
+    match state
+        .store
+        .allow(action, &block, limit, crate::RATE_WINDOW_SECS)
+        .await
+    {
         Ok(true) => None,
         Ok(false) => {
             let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
