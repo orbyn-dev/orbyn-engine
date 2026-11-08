@@ -69,6 +69,39 @@ pub struct Mailer {
     pub sender: Arc<dyn Sender>,
     /// Who delivers silent pushes; the default sends nothing and logs nothing.
     pub push: Arc<dyn orbyn_core::push::PushSender>,
+    /// Whom to tell to retire an account's service key (the key service's client). Without it a
+    /// retire job waits and is retried, so a worker started later with it does the work.
+    pub key_service: Option<Arc<dyn ServiceKeyRetirer>>,
+}
+
+/// What the worker asks of the key service: to retire an account's service key. The real one is the
+/// key service's client (mutual TLS); a test stands in with its own. Retiring is idempotent there.
+pub trait ServiceKeyRetirer: Send + Sync {
+    fn retire(
+        &self,
+        account: [u8; 16],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), orbyn_keyservice_client::ClientError>>
+                + Send
+                + '_,
+        >,
+    >;
+}
+
+impl ServiceKeyRetirer for orbyn_keyservice_client::Client {
+    fn retire(
+        &self,
+        account: [u8; 16],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), orbyn_keyservice_client::ClientError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move { orbyn_keyservice_client::Client::retire(self, &account).await })
+    }
 }
 
 impl std::fmt::Debug for Mailer {
@@ -85,6 +118,7 @@ impl Mailer {
             account_url: None,
             sender: Arc::new(mail::LogOnly),
             push: Arc::new(orbyn_core::push::NoPush),
+            key_service: None,
         }
     }
 }
@@ -113,6 +147,43 @@ async fn delete_unused_request(job: &jobs::Job, db: &Database, mailer: &Mailer) 
     match accounts.run_delete_unused_request(job).await {
         Ok(()) => Outcome::Done,
         Err(_) => Outcome::Retry("the request could not be decided".into()),
+    }
+}
+
+/// Tells the key service to retire the service key of an account that switched to Advanced. It
+/// runs again until the key service has done it (retiring is idempotent there), and it is skipped
+/// if the account is Standard again by the time it runs: the copy is gone either way (the switch
+/// removed the service envelopes), so the key opens nothing, and destroying a key the person
+/// went back to would lose it.
+pub async fn service_key_retire(job: &jobs::Job, db: &Database, mailer: &Mailer) -> Outcome {
+    let Some(account) = job.payload["account_id"]
+        .as_str()
+        .and_then(|text| uuid::Uuid::parse_str(text).ok())
+    else {
+        return Outcome::GiveUp("the retire job names no account".into());
+    };
+    let level: Result<Option<String>, _> = orbyn_core::sqlx::query_scalar(
+        "SELECT level FROM protection_settings WHERE account_id = $1 ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(account)
+    .fetch_optional(db.pool())
+    .await;
+    match level {
+        Ok(Some(level)) if level != "advanced" => return Outcome::Done,
+        Ok(_) => {}
+        Err(_) => return Outcome::Retry("the account's protection could not be read".into()),
+    }
+    let Some(key_service) = &mailer.key_service else {
+        return Outcome::Retry("this worker has no key service to retire the key with".into());
+    };
+    match key_service.retire(*account.as_bytes()).await {
+        Ok(()) => Outcome::Done,
+        // Whatever went wrong, trying again is safe; the queue gives up after its attempts, and
+        // the job stays in the table for an operator to see.
+        Err(error) => {
+            tracing::warn!(kind = ?error, job = %job.id, "could not retire a service key yet");
+            Outcome::Retry("the key service could not retire the key yet".into())
+        }
     }
 }
 
@@ -275,6 +346,8 @@ pub async fn run(
                         deliver_email(&job, &mailer).await
                     } else if job.kind == orbyn_store::ZONE_CHANGED_JOB {
                         zone_changed(&job, &db, &mailer).await
+                    } else if job.kind == orbyn_store::SERVICE_KEY_RETIRE_JOB {
+                        service_key_retire(&job, &db, &mailer).await
                     } else if job.kind == orbyn_core::accounts::DELETE_UNUSED_JOB_KIND {
                         delete_unused_request(&job, &db, &mailer).await
                     } else {
@@ -383,6 +456,7 @@ mod tests {
             account_url: None,
             push: Arc::new(orbyn_core::push::NoPush),
             sender,
+            key_service: None,
         };
 
         let capture = Capture::default();
@@ -416,6 +490,150 @@ mod tests {
         assert_eq!(handle(&job("noop")).await, Outcome::Done);
         assert_eq!(handle(&job("zone_changed")).await, Outcome::Done);
         assert!(matches!(handle(&job("typo")).await, Outcome::Retry(_)));
+    }
+
+    /// A key service that records the accounts it was told to retire and answers as told.
+    struct FakeRetirer {
+        told: std::sync::Mutex<Vec<[u8; 16]>>,
+        answer: Result<(), orbyn_keyservice_client::ClientError>,
+    }
+
+    impl ServiceKeyRetirer for FakeRetirer {
+        fn retire(
+            &self,
+            account: [u8; 16],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), orbyn_keyservice_client::ClientError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            self.told.lock().expect("lock").push(account);
+            let answer = self.answer.clone();
+            Box::pin(async move { answer })
+        }
+    }
+
+    async fn account_with_level(db: &Database, level: Option<&str>) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        orbyn_core::sqlx::query(
+            "INSERT INTO accounts (id, email, password_file) VALUES ($1, $2, decode('01', 'hex'))",
+        )
+        .bind(id)
+        .bind(format!("retire-{id}@example.com"))
+        .execute(db.pool())
+        .await
+        .expect("account");
+        if let Some(level) = level {
+            orbyn_core::sqlx::query(
+                "INSERT INTO protection_settings
+                     (account_id, seq, level, prev, hash, signed_at, signer_device_id, signature)
+                 VALUES ($1, 1, $2, decode(repeat('00', 32), 'hex'), decode(repeat('11', 32), 'hex'),
+                         1, $1, decode(repeat('22', 64), 'hex'))",
+            )
+            .bind(id)
+            .bind(level)
+            .execute(db.pool())
+            .await
+            .expect("setting");
+        }
+        id
+    }
+
+    fn retire_job(account: uuid::Uuid) -> jobs::Job {
+        let mut j = job(orbyn_store::SERVICE_KEY_RETIRE_JOB);
+        j.payload = serde_json::json!({"account_id": account});
+        j
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL"]
+    async fn a_retire_job_tells_the_key_service_and_is_safe_to_run_again() {
+        let url =
+            std::env::var("DATABASE_URL").expect("set DATABASE_URL to run the Postgres tests");
+        let db = Database::connect(&url).await.expect("connect");
+        db.migrate().await.expect("migrate");
+        let account = account_with_level(&db, Some("advanced")).await;
+        let fake = Arc::new(FakeRetirer {
+            told: Default::default(),
+            answer: Ok(()),
+        });
+        let mailer = Mailer {
+            key_service: Some(fake.clone()),
+            ..Mailer::log_only()
+        };
+        assert_eq!(
+            service_key_retire(&retire_job(account), &db, &mailer).await,
+            Outcome::Done
+        );
+        // At least once: running it again tells the service again, which is idempotent there.
+        assert_eq!(
+            service_key_retire(&retire_job(account), &db, &mailer).await,
+            Outcome::Done
+        );
+        assert_eq!(
+            *fake.told.lock().expect("lock"),
+            vec![*account.as_bytes(); 2]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL"]
+    async fn a_retire_job_waits_when_the_service_is_down_or_missing_and_skips_a_standard_account() {
+        let url =
+            std::env::var("DATABASE_URL").expect("set DATABASE_URL to run the Postgres tests");
+        let db = Database::connect(&url).await.expect("connect");
+        db.migrate().await.expect("migrate");
+        let advanced = account_with_level(&db, Some("advanced")).await;
+        // The key service is down: retry, never done and never given up, so the key is not left.
+        let down = Arc::new(FakeRetirer {
+            told: Default::default(),
+            answer: Err(orbyn_keyservice_client::ClientError::Unavailable),
+        });
+        let mailer = Mailer {
+            key_service: Some(down.clone()),
+            ..Mailer::log_only()
+        };
+        assert!(matches!(
+            service_key_retire(&retire_job(advanced), &db, &mailer).await,
+            Outcome::Retry(_)
+        ));
+        assert_eq!(down.told.lock().expect("lock").len(), 1);
+        // No key service on this worker: retry too, so a worker that has one does it later.
+        assert!(matches!(
+            service_key_retire(&retire_job(advanced), &db, &Mailer::log_only()).await,
+            Outcome::Retry(_)
+        ));
+        // The account went back to Standard before the job ran: the service is not told.
+        let standard = account_with_level(&db, Some("standard")).await;
+        let fake = Arc::new(FakeRetirer {
+            told: Default::default(),
+            answer: Ok(()),
+        });
+        let mailer = Mailer {
+            key_service: Some(fake.clone()),
+            ..Mailer::log_only()
+        };
+        assert_eq!(
+            service_key_retire(&retire_job(standard), &db, &mailer).await,
+            Outcome::Done
+        );
+        assert!(fake.told.lock().expect("lock").is_empty());
+        // An account that is gone still gets its key retired.
+        let gone = uuid::Uuid::new_v4();
+        assert_eq!(
+            service_key_retire(&retire_job(gone), &db, &mailer).await,
+            Outcome::Done
+        );
+        assert_eq!(*fake.told.lock().expect("lock"), vec![*gone.as_bytes()]);
+        // A job that names no account is given up on, not retried for ever.
+        let mut bad = job(orbyn_store::SERVICE_KEY_RETIRE_JOB);
+        bad.payload = serde_json::json!({"account_id": "not a uuid"});
+        assert!(matches!(
+            service_key_retire(&bad, &db, &mailer).await,
+            Outcome::GiveUp(_)
+        ));
     }
 
     #[tokio::test(start_paused = true)]

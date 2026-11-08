@@ -17,6 +17,7 @@ base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 orbyn-core.workspace = true
+orbyn-keyservice-client.workspace = true
 orbyn-keyservice = { workspace = true, features = ["pkcs11"] }
 orbyn-server.workspace = true
 orbyn-store.workspace = true

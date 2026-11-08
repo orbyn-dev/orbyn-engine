@@ -268,7 +268,30 @@ fn warn_log_codes() {
 /// for development mode, which logs that a message was not sent and sends nothing. SMTP needs
 /// `ORBYN_AUTH_SETUP` to open a queued message; in log mode, without it every message is logged as
 /// not sent. A worker with neither refuses to start: it would accept sign-ups nobody can complete.
+/// The key service's client, from the settings, when there are any: read the CA and the client
+/// identity files and build it. TODO-design: the messages here are plain text.
+fn key_service_client(config: &Config) -> Result<Option<orbyn_keyservice_client::Client>, String> {
+    let Some(settings) = &config.key_service else {
+        return Ok(None);
+    };
+    let read = |name: &str, path: &str| {
+        std::fs::read(path).map_err(|_| format!("error: {name} can't be read\n  Check the path, and that the user running Orbyn can read the file."))
+    };
+    let ca = read("ORBYN_KEYSERVICE_CA_FILE", &settings.ca_file)?;
+    let identity = read("ORBYN_KEYSERVICE_CLIENT_FILE", &settings.client_file)?;
+    orbyn_keyservice_client::Client::new(&orbyn_keyservice_client::ClientConfig {
+        base_url: &settings.url,
+        server_ca_pem: &ca,
+        identity_pem: &identity,
+        timeout: Duration::from_secs(20),
+    })
+    .map(Some)
+    .map_err(|_| "error: the key service settings are not usable\n  Check ORBYN_KEYSERVICE_URL and the two files.".to_owned())
+}
+
 fn mailer(config: &Config) -> Result<orbyn_worker::Mailer, String> {
+    let key_service: Option<std::sync::Arc<dyn orbyn_worker::ServiceKeyRetirer>> =
+        key_service_client(config)?.map(|c| std::sync::Arc::new(c) as _);
     let secrets = match &config.auth_setup {
         Some(setup) => Some(std::sync::Arc::new(
             orbyn_core::accounts::AuthSecrets::from_encoded(setup).map_err(|e| e.to_string())?,
@@ -284,6 +307,7 @@ fn mailer(config: &Config) -> Result<orbyn_worker::Mailer, String> {
             account_url: config.account_url.clone(),
             push: std::sync::Arc::new(orbyn_core::push::NoPush),
             sender: std::sync::Arc::new(orbyn_core::mail::LogCodes),
+            key_service: key_service.clone(),
         });
     }
     match (&config.smtp_url, &config.mail_from) {
@@ -304,6 +328,7 @@ fn mailer(config: &Config) -> Result<orbyn_worker::Mailer, String> {
                 account_url: config.account_url.clone(),
                 push: std::sync::Arc::new(orbyn_core::push::NoPush),
                 sender: std::sync::Arc::new(sender),
+                key_service: key_service.clone(),
             })
         }
         _ if !config.mail_log_only => Err(format!(
@@ -317,6 +342,7 @@ fn mailer(config: &Config) -> Result<orbyn_worker::Mailer, String> {
                 account_url: config.account_url.clone(),
                 push: std::sync::Arc::new(orbyn_core::push::NoPush),
                 sender: std::sync::Arc::new(orbyn_core::mail::LogOnly),
+                key_service,
             })
         }
     }

@@ -244,6 +244,31 @@ impl Store {
         .bind(new.signature.as_slice())
         .execute(&mut *tx)
         .await?;
+        // Advanced means no copy: in the same transaction, under the account's lock, the service
+        // envelopes and the cached certification go, and the key service is told to destroy the
+        // key (a job, so a key service that is down is told later; it is idempotent there).
+        if new.level == ProtectionLevel::Advanced {
+            sqlx::query(
+                "DELETE FROM key_envelopes WHERE account_id = $1 AND recipient_kind = 'service'",
+            )
+            .bind(session.account_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM account_service_keys WHERE account_id = $1")
+                .bind(session.account_id)
+                .execute(&mut *tx)
+                .await?;
+            orbyn_core::jobs::enqueue_with_attempts(
+                &mut *tx,
+                crate::SERVICE_KEY_RETIRE_JOB,
+                serde_json::json!({"account_id": session.account_id}),
+                // One job per switch to Advanced, so a later switch (after Standard again) is its
+                // own and is not taken for a finished one.
+                Some(&format!("{}:{}", session.account_id, new.seq)),
+                crate::SERVICE_KEY_RETIRE_ATTEMPTS,
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(ProtectionRecord {
             level: new.level,

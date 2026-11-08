@@ -10,17 +10,19 @@ publish.workspace = true
 [dependencies]
 lettre.workspace = true
 orbyn-core.workspace = true
+orbyn-keyservice-client.workspace = true
 orbyn-store.workspace = true
 rustls-pki-types.workspace = true
 tokio.workspace = true
 chrono.workspace = true
 url.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 rcgen.workspace = true
 tokio-rustls.workspace = true
-uuid.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
