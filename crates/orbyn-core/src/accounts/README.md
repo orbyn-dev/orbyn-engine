@@ -7,6 +7,9 @@ second factor, invites, limits, deletion and push tokens.
 | --- | --- |
 | `email` | Sign-up, email verification and resend |
 | `email_code` | The mailed code's alphabet, grouping and typing rules |
+| `service` | Account construction and shared request-context helpers |
+| `register` | The OPAQUE sign-up steps and the pending sign-up record |
+| `login` | The OPAQUE sign-in exchange, sessions and trusted-device checks |
 | `sessions` | Session tokens and revocation |
 | `devices` | Device registration, the device list and approvals |
 | `second_factor` | TOTP enrolment, confirmation, disabling and sign-in |
