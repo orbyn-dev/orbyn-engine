@@ -1,5 +1,4 @@
 {
   "crates/orbyn-wasm/src/lib.rs": 943,
-  "crates/orbyn-witness/src/lib.rs": 679,
   "crates/orbyn-worker/src/smtp.rs": 730
 }
