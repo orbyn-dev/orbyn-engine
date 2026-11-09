@@ -1,0 +1,2 @@
+# Pure moves: renames with no edit, after they land on main.
+# A move that also edits a module line or an import is not pure and does not belong here.

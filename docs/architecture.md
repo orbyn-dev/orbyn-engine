@@ -2,6 +2,23 @@
 
 The plan lives in the internal Orbyn Platform Plan. This file is the contract the code follows. Change it in the same commit as any rule it states.
 
+## Owners
+
+| Owner | Path | Owns |
+| --- | --- | --- |
+| Wire contract | `crates/orbyn-contracts` | Serialized types shared by the server and every device; generated TypeScript in `bindings/` |
+| Device primitives | `crates/orbyn-crypto`, `orbyn-sync`, `orbyn-auth-client`, `orbyn-translog`, `orbyn-planner` | Keys, merge, sign-in and planner rules; no IO |
+| Device engine | `crates/orbyn-client` | Encryption, uploads, merges, zone keys and the service-key check; no IO |
+| Device bindings | `crates/orbyn-wasm` | The JavaScript surface over the device crates |
+| Server foundation | `crates/orbyn-core`, `orbyn-store` | Accounts, mail, jobs, feeds, push and the record store |
+| Key service | `crates/orbyn-keyservice`, `orbyn-keyservice-server`, `orbyn-keyservice-client`, `orbyn-keyservice-daemon`, `orbyn-witness` | The HSM boundary, store, internal API and witness |
+| Transport and process | `crates/orbyn-server`, `orbyn-worker`, `orbyn-cli` | HTTP, jobs and the binary; parsing and mapping only |
+
+Dependency direction: transport and process crates call providers, providers call
+primitives, and the contract is a leaf used at the wire boundary. A device crate
+never depends on a server crate. `crates/README.md` lists every crate and
+`scripts/check_structure.py` enforces the edges.
+
 ## Rules
 
 - Each device keeps the whole planner and works offline. The server is never the only copy of a person's work.

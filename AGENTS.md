@@ -4,7 +4,12 @@ Read [docs/architecture.md](docs/architecture.md) before changing behaviour. Its
 
 ## Layout
 
-- `crates/`: the Rust workspace. Each crate's README says what it owns.
+- `crates/`: the Rust workspace. Each crate's README says what it owns;
+  [crates/README.md](crates/README.md) lists the roles and the one-way dependency
+  direction.
+- `crates/orbyn-core/src/`: capability groups. A new module joins a group in
+  [orbyn-core/README.md](crates/orbyn-core/README.md#groups), and a new group adds
+  its own README and a row there.
 - `migrations/`: Postgres schema, applied by `orbyn migrate`.
 - `docker/`, `compose.yaml`: the image and the local stack.
 - `docs/architecture.md`: the contract. Its rules change in the same commit as the code.
@@ -12,6 +17,7 @@ Read [docs/architecture.md](docs/architecture.md) before changing behaviour. Its
 ## Checks
 
 ```bash
+python3 scripts/check_structure.py
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 

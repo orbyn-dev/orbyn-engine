@@ -19,6 +19,7 @@ mod delete;
 mod delete_unused;
 mod devices;
 mod email;
+pub mod email_code;
 pub mod invites;
 pub mod limits;
 mod push_tokens;
@@ -26,7 +27,6 @@ mod second_factor;
 pub mod secrets;
 mod sessions;
 pub mod totp;
-
 /// How long a deleted account's tombstone is kept, in days. A session lasts at most a year, so a
 /// device offline for longer would be signed out by expiry anyway.
 pub const TOMBSTONE_DAYS: i32 = 400;

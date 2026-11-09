@@ -1,0 +1,16 @@
+{
+  "crates/orbyn-client/src/lib.rs": 1452,
+  "crates/orbyn-contracts/src/lib.rs": 1000,
+  "crates/orbyn-core/src/accounts/devices.rs": 797,
+  "crates/orbyn-core/src/accounts/email.rs": 706,
+  "crates/orbyn-core/src/accounts/mod.rs": 1273,
+  "crates/orbyn-core/src/accounts/second_factor.rs": 638,
+  "crates/orbyn-keyservice/src/pkcs11.rs": 607,
+  "crates/orbyn-server/src/accounts.rs": 884,
+  "crates/orbyn-server/src/records.rs": 704,
+  "crates/orbyn-store/src/records.rs": 617,
+  "crates/orbyn-translog/src/map.rs": 1009,
+  "crates/orbyn-wasm/src/lib.rs": 943,
+  "crates/orbyn-witness/src/lib.rs": 679,
+  "crates/orbyn-worker/src/smtp.rs": 730
+}

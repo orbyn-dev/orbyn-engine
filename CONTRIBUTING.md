@@ -20,10 +20,19 @@ The [Title](.github/workflows/pr-title.yml) check enforces this.
 ## Checks
 
 ```bash
+python3 scripts/check_structure.py
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
 Tests that need Postgres read `DATABASE_URL`. `docker compose up -d postgres` starts one locally.
+
+## Structure
+
+- One crate, one role: [crates/README.md](crates/README.md) lists them and the allowed dependency direction.
+- One capability per folder under `crates/orbyn-core/src`; each group has a README and a row in [orbyn-core/README.md](crates/orbyn-core/README.md#groups).
+- Transport validates, calls one owner operation and maps the result. It holds no product rule.
+- Non-test source past 600 lines becomes a folder; [structure-baseline.json](scripts/structure-baseline.json) may only shrink.
+- A pure move is its own commit and goes in [.git-blame-ignore-revs](.git-blame-ignore-revs). A move that also edits an import is not pure.
 
 ## Pull requests
 
