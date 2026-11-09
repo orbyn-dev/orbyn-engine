@@ -1,7 +1,4 @@
 {
-  "crates/orbyn-core/src/accounts/devices.rs": 797,
-  "crates/orbyn-core/src/accounts/email.rs": 706,
-  "crates/orbyn-core/src/accounts/second_factor.rs": 638,
   "crates/orbyn-keyservice/src/pkcs11.rs": 607,
   "crates/orbyn-store/src/records.rs": 617,
   "crates/orbyn-wasm/src/lib.rs": 943,

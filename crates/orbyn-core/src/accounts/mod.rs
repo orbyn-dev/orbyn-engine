@@ -569,7 +569,11 @@ mod account_id_tests {
     /// from: the function takes no input, and the one place an account row is inserted binds it.
     #[test]
     fn the_sign_up_binds_a_fresh_random_id_and_derives_none_from_the_address() {
-        let source = include_str!("email.rs");
+        let source = [
+            include_str!("email.rs"),
+            include_str!("email/verification.rs"),
+        ]
+        .concat();
         assert!(
             source.contains(".bind(new_account_id()?)"),
             "the account row's id is new_account_id()"
