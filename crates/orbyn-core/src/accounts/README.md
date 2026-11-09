@@ -6,6 +6,7 @@ second factor, invites, limits, deletion and push tokens.
 | Module | Owns |
 | --- | --- |
 | `email` | Sign-up, email verification and resend |
+| `email_code` | The mailed code's alphabet, grouping and typing rules |
 | `sessions` | Session tokens and revocation |
 | `devices` | Device registration, the device list and approvals |
 | `second_factor` | TOTP enrolment, confirmation, disabling and sign-in |

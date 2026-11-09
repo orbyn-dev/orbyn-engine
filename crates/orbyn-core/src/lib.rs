@@ -9,7 +9,7 @@ pub mod mail;
 pub mod push;
 
 pub use accounts::Accounts;
-pub mod email_code;
+pub use accounts::email_code;
 pub use config::{Config, KeyServiceSettings, SignupMode};
 pub use db::Database;
 pub use sqlx;

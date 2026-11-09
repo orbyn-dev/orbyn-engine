@@ -14,9 +14,11 @@ group; a new group adds its own `README.md` and a row here.
 | --- | --- |
 | [accounts](src/accounts/README.md) | Sign-up, sign-in, sessions, trusted devices, approvals, second factor, invites, limits, deletion and push tokens |
 | [mail](src/mail/README.md) | The message model, the designed bodies and the sender boundary |
+| [jobs](src/jobs/README.md) | The durable job queue, leases, retries and pruning |
+| [feeds](src/feeds/README.md) | Calendar feeds fetched on a device's behalf, and their request policy |
+| [push](src/push/README.md) | Silent push: the provider boundary and the constant message |
 
-Shared by every group, at the crate root: `config`, `db`, `jobs`, `feeds`, `push`
-and `email_code`.
+Shared by every group, at the crate root: `config` and `db`.
 
 ## Consumers
 
