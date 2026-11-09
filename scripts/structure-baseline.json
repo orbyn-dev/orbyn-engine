@@ -5,7 +5,6 @@
   "crates/orbyn-core/src/accounts/second_factor.rs": 638,
   "crates/orbyn-keyservice/src/pkcs11.rs": 607,
   "crates/orbyn-store/src/records.rs": 617,
-  "crates/orbyn-translog/src/map.rs": 1009,
   "crates/orbyn-wasm/src/lib.rs": 943,
   "crates/orbyn-witness/src/lib.rs": 679,
   "crates/orbyn-worker/src/smtp.rs": 730
