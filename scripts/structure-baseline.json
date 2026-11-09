@@ -1,5 +1,4 @@
 {
-  "crates/orbyn-client/src/lib.rs": 1452,
   "crates/orbyn-contracts/src/lib.rs": 1000,
   "crates/orbyn-core/src/accounts/devices.rs": 797,
   "crates/orbyn-core/src/accounts/email.rs": 706,
