@@ -6,3 +6,10 @@ path-compressed sparse Merkle map with membership and non-membership proofs and
 the witness's update function. It also carries the cosignature, its verification
 and the witness threshold rule. No IO; the same code runs on the key service and
 on devices, including WebAssembly.
+
+## Map modules
+
+| Module | Owns |
+| --- | --- |
+| `map/proof` | Proof steps and ends, encoding, verification and update |
+| `map/tree` | The in-memory reference map and node construction |
