@@ -9,4 +9,10 @@ ignore = [
     # `cargo tree`), so no crypto-bigint arithmetic runs. Remove once opaque-ke
     # depends on crypto-bigint >= 0.7.6.
     "RUSTSEC-2026-0387",
+    # libsqlite3-sys 0.37.0 carries CVE-2026-119375, reached only through
+    # sqlx-sqlite. The workspace uses sqlx with default-features = false and
+    # only the Postgres driver, so neither crate is in the build for any target
+    # (checked with `cargo tree --target all -i libsqlite3-sys`). Remove once
+    # sqlx's SQLite feature depends on libsqlite3-sys >= 0.39.0.
+    "RUSTSEC-2026-0459",
 ]

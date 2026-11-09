@@ -55,6 +55,7 @@ Later phases add local storage for `orbyn-client` (SQLite on desktop and mobile)
 ## Cryptography
 
 - `cargo audit` ignores RUSTSEC-2026-0387 (crypto-bigint 0.5 timing) in `.cargo/audit.toml`. It is pulled in only through opaque-ke 4.0's elliptic-curve support, whose group code is generic over NIST-style curves. Our suite is Ristretto255 on curve25519-dalek, and no such curve is in the build, so crypto-bigint arithmetic never runs. Remove the exception when opaque-ke depends on crypto-bigint 0.7.6 or later.
+- `cargo audit` ignores RUSTSEC-2026-0459 (libsqlite3-sys 0.37, CVE-2026-119375) in `.cargo/audit.toml`. It is in the lock only through `sqlx-sqlite`, an optional dependency of the `sqlx` umbrella; the workspace sets `default-features = false` and enables only Postgres, so neither crate is in the build for any target (checked with `cargo tree --target all -i libsqlite3-sys`). Remove the exception when sqlx's SQLite feature requires libsqlite3-sys 0.39.0 or later.
 
 - Records, zone keys and service keys are 256-bit keys used with XChaCha20-Poly1305 and a random 192-bit nonce.
 - Every seal and signature binds a context string such as `orbyn/record/v1` with a length prefix, so a value made for one purpose cannot be accepted as another.
