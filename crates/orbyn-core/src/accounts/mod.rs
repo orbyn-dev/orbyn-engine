@@ -17,6 +17,7 @@
 
 mod delete;
 mod delete_unused;
+mod device_app;
 mod devices;
 mod email;
 pub mod email_code;
@@ -36,6 +37,7 @@ pub const TOMBSTONE_DAYS: i32 = 400;
 
 pub use delete::{FRESH_SIGN_IN_SECS, signed_in_recently};
 pub use delete_unused::{DELETE_UNUSED_TTL, REQUEST_JOB_KIND as DELETE_UNUSED_JOB_KIND};
+pub use device_app::App;
 pub use limits::{Limit, Limits};
 pub use push_tokens::PUSH_TOKEN_DAYS;
 pub use second_factor::{ManageProof, TotpEnrolment};
@@ -46,15 +48,11 @@ use orbyn_auth_client::opaque_ke::{
     CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
     ServerLogin, ServerLoginParameters, ServerRegistration,
 };
-use orbyn_auth_client::{
-    DEVICE_LOGIN_CONTEXT, DEVICE_REGISTER_CONTEXT, LOGIN_CONTEXT, OsRng, Suite, login_message,
-    normalize_email, register_message,
-};
+use orbyn_auth_client::{LOGIN_CONTEXT, OsRng, Suite, normalize_email};
 use orbyn_crypto::{DevicePublic, Sealed};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::net::IpAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
 /// How long the server keeps its half of a sign-in.
@@ -258,6 +256,7 @@ impl DeviceState {
 pub struct NewDevice {
     pub name: String,
     pub platform: Platform,
+    pub app: Option<App>,
     pub keys: DevicePublic,
 }
 
@@ -323,6 +322,7 @@ pub struct Device {
     pub id: Uuid,
     pub name: String,
     pub platform: Platform,
+    pub app: Option<App>,
     pub state: DeviceState,
     pub keys: DevicePublic,
     pub created_at: DateTime<Utc>,

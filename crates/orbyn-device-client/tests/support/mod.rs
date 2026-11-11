@@ -8,8 +8,10 @@ use orbyn_auth_client::opaque_ke::{
     ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
 };
 use orbyn_auth_client::{
-    DEVICE_LOGIN_CONTEXT, DEVICE_REGISTER_CONTEXT, LOGIN_CONTEXT, OsRng, Suite,
-    TRUSTED_START_CONTEXT, login_message, normalize_email, register_message, trusted_start_message,
+    DEVICE_LOGIN_CONTEXT, DEVICE_LOGIN_V2_CONTEXT, DEVICE_REGISTER_CONTEXT,
+    DEVICE_REGISTER_V2_CONTEXT, Descriptor, LOGIN_CONTEXT, OsRng, Suite, TRUSTED_START_CONTEXT,
+    login_message, login_message_v2, normalize_email, register_message, register_message_v2,
+    trusted_start_message,
 };
 use orbyn_contracts as wire;
 use orbyn_crypto::{DevicePublic, pow};
@@ -38,6 +40,17 @@ pub struct Device {
     pub id: String,
     pub keys: DevicePublic,
     pub trusted: bool,
+    /// The app label the device signed in, if it named one.
+    pub app: Option<wire::DeviceApp>,
+}
+
+/// The descriptor a v2 message must cover: what the server would build from the request.
+fn descriptor(device: &wire::NewDevice, app: wire::DeviceApp) -> Descriptor<'_> {
+    Descriptor {
+        name: device.name.trim(),
+        platform: device.platform.as_str(),
+        app: app.as_str(),
+    }
 }
 
 pub struct Account {
@@ -52,6 +65,7 @@ struct Pending {
     email: String,
     file: Vec<u8>,
     keys: DevicePublic,
+    app: Option<wire::DeviceApp>,
     code: String,
     invite: Option<String>,
 }
@@ -206,6 +220,15 @@ impl FakeEngine {
             .len()
     }
 
+    /// The app label each device of the account signed, in the order they joined.
+    pub fn device_apps(&self, email: &str) -> Vec<Option<wire::DeviceApp>> {
+        self.state.lock().expect("lock").accounts[email]
+            .devices
+            .iter()
+            .map(|d| d.app)
+            .collect()
+    }
+
     /// Every request body the fake has seen, as `(path, body text)`.
     pub fn log(&self) -> Vec<(String, String)> {
         self.state.lock().expect("lock").log.clone()
@@ -322,13 +345,18 @@ fn register_finish(s: &mut State, body: Value) -> Result<Response, DeviceError> 
     let signature: [u8; 64] = unb64(&finish.device_signature)
         .try_into()
         .expect("signature");
-    orbyn_crypto::verify(
-        &keys,
-        DEVICE_REGISTER_CONTEXT,
-        &register_message(&email, &upload, &keys),
-        &signature,
-    )
-    .expect("the device signed the registration");
+    let (context, message) = match finish.device.app {
+        Some(app) => (
+            DEVICE_REGISTER_V2_CONTEXT,
+            register_message_v2(&email, &upload, &keys, &descriptor(&finish.device, app)),
+        ),
+        None => (
+            DEVICE_REGISTER_CONTEXT,
+            register_message(&email, &upload, &keys),
+        ),
+    };
+    orbyn_crypto::verify(&keys, context, &message, &signature)
+        .expect("the device signed the registration");
     if let Some((challenge, bits)) = s.proof {
         let solved = finish.proof.as_ref().is_some_and(|p| {
             p.challenge == hex(&challenge)
@@ -360,6 +388,7 @@ fn register_finish(s: &mut State, body: Value) -> Result<Response, DeviceError> 
             email,
             file,
             keys,
+            app: finish.device.app,
             code,
             invite,
         },
@@ -392,6 +421,7 @@ fn email_verify(s: &mut State, body: &Value, now: i64) -> Result<Response, Devic
                 id: device_id.clone(),
                 keys: pending.keys,
                 trusted: true,
+                app: pending.app,
             }],
             totp: None,
         },
@@ -523,13 +553,15 @@ fn login_finish(s: &mut State, body: &Value, now: i64) -> Result<Response, Devic
     let signature: [u8; 64] = unb64(&finish.device_signature)
         .try_into()
         .expect("signature");
-    orbyn_crypto::verify(
-        &keys,
-        DEVICE_LOGIN_CONTEXT,
-        &login_message(&login_id, &keys),
-        &signature,
-    )
-    .expect("the device signed the login");
+    let (context, message) = match finish.device.app {
+        Some(app) => (
+            DEVICE_LOGIN_V2_CONTEXT,
+            login_message_v2(&login_id, &keys, &descriptor(&finish.device, app)),
+        ),
+        None => (DEVICE_LOGIN_CONTEXT, login_message(&login_id, &keys)),
+    };
+    orbyn_crypto::verify(&keys, context, &message, &signature)
+        .expect("the device signed the login");
     let account = s.accounts.get_mut(&login.email).expect("account");
     let existing = account.devices.iter().position(|d| d.keys == keys);
     let (device_id, trusted) = match existing {
@@ -543,6 +575,7 @@ fn login_finish(s: &mut State, body: &Value, now: i64) -> Result<Response, Devic
                 id: id.clone(),
                 keys,
                 trusted: false,
+                app: finish.device.app,
             });
             (id, false)
         }

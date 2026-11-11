@@ -72,10 +72,8 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         drop(request.password);
         let keys = DeviceKeys::generate().map_err(|_| DeviceError::Crypto)?;
         let public = keys.public();
-        let signature = keys.sign(
-            auth::DEVICE_REGISTER_CONTEXT,
-            &auth::register_message(&email, &finish.upload, &public),
-        );
+        let (context, message) = self.register_message(&email, &finish.upload, &public);
+        let signature = keys.sign(context, &message);
         let mut body = wire::RegisterFinish {
             email: email.clone(),
             registration_upload: encode(&finish.upload),

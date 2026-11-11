@@ -3,7 +3,7 @@
 
 mod support;
 
-use orbyn_contracts::{DevicePlatform, DeviceState};
+use orbyn_contracts::{DeviceApp, DevicePlatform, DeviceState};
 use orbyn_device_client::{
     ClientConfig, Clock, DeviceApi, DeviceClient, DeviceError, HttpApi, KeyStore, MemoryStore,
     Method, Request, Response, SecondFactor, SignInOutcome, SignUpRequest, StoredIdentity,
@@ -36,6 +36,7 @@ fn client(engine: &FakeEngine, name: &str) -> Client {
         ClientConfig {
             device_name: name.to_owned(),
             platform: DevicePlatform::Linux,
+            app: Some(DeviceApp::Engineering),
         },
     )
 }
@@ -540,4 +541,42 @@ async fn the_http_transport_does_not_follow_redirects_and_reads_retry_after() {
         .await
         .expect("answer");
     assert_eq!((response.status, response.retry_after), (429, Some(7)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_app_label_is_signed_at_sign_up_and_sign_in_and_a_client_with_none_signs_the_old_messages()
+ {
+    let engine = FakeEngine::new();
+    // The fake checks the v2 message when a label is sent and the v1 message when not, and
+    // panics on a bad signature, so each of these passes only if the client signed the right one.
+    let a = client(&engine, "  Laptop  ");
+    let mut pending = a.begin_sign_up(request(None)).await.expect("begin");
+    let code = engine.code_for(NORMAL);
+    a.verify_sign_up(&mut pending, &code).await.expect("verify");
+    let plain = DeviceClient::new(
+        engine.clone(),
+        MemoryStore::new(),
+        SharedClock(engine.now.clone()),
+        ClientConfig {
+            device_name: " Tablet ".to_owned(),
+            platform: DevicePlatform::Linux,
+            app: None,
+        },
+    );
+    plain
+        .sign_in(NORMAL, &password(PASSWORD))
+        .await
+        .expect("an unlabelled device signs in with the v1 message");
+    let b = client(&engine, "Phone");
+    b.sign_in(NORMAL, &password(PASSWORD))
+        .await
+        .expect("a labelled device signs in with the v2 message");
+    assert_eq!(
+        engine.device_apps(NORMAL),
+        vec![
+            Some(DeviceApp::Engineering),
+            None,
+            Some(DeviceApp::Engineering)
+        ]
+    );
 }

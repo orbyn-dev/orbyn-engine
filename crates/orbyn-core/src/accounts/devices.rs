@@ -19,7 +19,7 @@
 //! Removing a device carries the remover's signature, which every device checks.
 
 use super::{
-    AccountError, Accounts, Approval, ApprovalView, AuditAction, Client, Device, DeviceState,
+    AccountError, Accounts, App, Approval, ApprovalView, AuditAction, Client, Device, DeviceState,
     Platform, Removal, Result, Session, limits, public_keys,
 };
 use chrono::{DateTime, Utc};
@@ -52,6 +52,7 @@ struct DeviceRow {
     id: Uuid,
     name: String,
     platform: String,
+    app: Option<String>,
     state: String,
     signing_key: Vec<u8>,
     agreement_key: Vec<u8>,
@@ -91,7 +92,7 @@ struct ApprovalRow {
 macro_rules! select_devices {
     ($tail:literal) => {
         concat!(
-            "SELECT id, name, platform, state, signing_key, agreement_key, created_at, ",
+            "SELECT id, name, platform, app, state, signing_key, agreement_key, created_at, ",
             "approved_by, approval_signature, approval_id, approval_created_at, ",
             "approval_endorsement_hash FROM devices ",
             $tail
@@ -117,6 +118,7 @@ impl TryFrom<DeviceRow> for Device {
             id: row.id,
             name: row.name,
             platform: Platform::parse(&row.platform)?,
+            app: App::parse_opt(row.app.as_deref())?,
             state: DeviceState::parse(&row.state).map_err(|_| AccountError::Internal)?,
             keys: public_keys(&row.signing_key, &row.agreement_key)?,
             created_at: row.created_at,

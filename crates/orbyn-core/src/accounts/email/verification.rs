@@ -133,6 +133,7 @@ impl Accounts {
             Vec<u8>,
             String,
             String,
+            Option<String>,
             Vec<u8>,
             Vec<u8>,
             Option<Uuid>,
@@ -141,14 +142,14 @@ impl Accounts {
         // second finds it gone.
         self.step("row-lock");
         let row: Option<Row> = sqlx::query_as(
-            "SELECT email, decoy, password_file, device_name, device_platform,
+            "SELECT email, decoy, password_file, device_name, device_platform, device_app,
                     device_signing_key, device_agreement_key, invite_id
              FROM pending_signups WHERE id = $1 AND expires_at > now() FOR UPDATE",
         )
         .bind(signup_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let (email, decoy, password_file, name, platform, signing, agreement, invite_id) =
+        let (email, decoy, password_file, name, platform, app, signing, agreement, invite_id) =
             row.ok_or(AccountError::InvalidEmailCode)?;
         self.step("code-lock");
         let record: Option<(Vec<u8>, i32)> = sqlx::query_as(
@@ -235,13 +236,14 @@ impl Accounts {
         }
         let device_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO devices (id, account_id, name, platform, signing_key, agreement_key, state, approved_at)
-             VALUES ($1, $2, $3, $4, $5, $6, 'trusted', now())",
+            "INSERT INTO devices (id, account_id, name, platform, app, signing_key, agreement_key, state, approved_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'trusted', now())",
         )
         .bind(device_id)
         .bind(account_id)
         .bind(&name)
         .bind(&platform)
+        .bind(&app)
         .bind(&signing)
         .bind(&agreement)
         .execute(&mut *tx)

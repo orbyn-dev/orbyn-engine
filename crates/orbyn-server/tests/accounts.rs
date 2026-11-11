@@ -9753,3 +9753,335 @@ async fn deleting_one_unused_account_never_releases_another_accounts_invite() {
         (StatusCode::BAD_REQUEST, json!("invite_invalid"))
     );
 }
+
+// ---- The device's app label, signed into its register and login messages -----------------------
+
+/// What a labelled device says about itself and what it signed: the body's name, platform and app,
+/// and the descriptor its signature covers (which a test can make differ from the body).
+struct Label<'a> {
+    sent_name: &'a str,
+    sent_app: Option<&'a str>,
+    sent_platform: &'a str,
+    signed: Option<(&'a str, &'a str, &'a str)>,
+}
+
+fn labelled_device(label: &Label<'_>, keys: &DevicePublic) -> Value {
+    let mut device = json!({
+        "name": label.sent_name,
+        "platform": label.sent_platform,
+        "signing_key": b64(&keys.signing),
+        "agreement_key": b64(&keys.agreement),
+    });
+    if let Some(app) = label.sent_app {
+        device["app"] = json!(app);
+    }
+    device
+}
+
+fn descriptor<'a>(signed: (&'a str, &'a str, &'a str)) -> auth::Descriptor<'a> {
+    auth::Descriptor {
+        name: signed.0,
+        platform: signed.1,
+        app: signed.2,
+    }
+}
+
+impl Server {
+    async fn register_labelled(
+        &self,
+        email: &str,
+        upload: &[u8],
+        keys: &DeviceKeys,
+        label: &Label<'_>,
+    ) -> (StatusCode, Value) {
+        let normalized = auth::normalize_email(email).expect("email");
+        let public = keys.public();
+        let signature = match label.signed {
+            Some(signed) => keys.sign(
+                auth::DEVICE_REGISTER_V2_CONTEXT,
+                &auth::register_message_v2(&normalized, upload, &public, &descriptor(signed)),
+            ),
+            None => keys.sign(
+                auth::DEVICE_REGISTER_CONTEXT,
+                &auth::register_message(&normalized, upload, &public),
+            ),
+        };
+        self.call(
+            Method::POST,
+            "/v1/accounts/register/finish",
+            None,
+            Some(json!({
+                "email": email,
+                "registration_upload": b64(upload),
+                "device": labelled_device(label, &public),
+                "device_signature": b64(&signature),
+            })),
+        )
+        .await
+    }
+
+    async fn login_labelled(
+        &self,
+        email: &str,
+        password: &[u8],
+        keys: &DeviceKeys,
+        label: &Label<'_>,
+    ) -> (StatusCode, Value) {
+        let (login, status, started) = self.login_start(email, password).await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let finish = login
+            .finish(password, &unb64(&started["credential_response"]))
+            .expect("right password");
+        let login_id = uuid_of(&started["login_id"]);
+        let public = keys.public();
+        let signature = match label.signed {
+            Some(signed) => keys.sign(
+                auth::DEVICE_LOGIN_V2_CONTEXT,
+                &auth::login_message_v2(login_id.as_bytes(), &public, &descriptor(signed)),
+            ),
+            None => keys.sign(
+                auth::DEVICE_LOGIN_CONTEXT,
+                &auth::login_message(login_id.as_bytes(), &public),
+            ),
+        };
+        self.call(
+            Method::POST,
+            "/v1/sessions/login/finish",
+            None,
+            Some(json!({
+                "login_id": started["login_id"],
+                "credential_finalization": b64(&finish.finalization),
+                "device": labelled_device(label, &public),
+                "device_signature": b64(&signature),
+            })),
+        )
+        .await
+    }
+
+    async fn device_list(&self, session: &Value) -> Vec<Value> {
+        let (status, list) = self
+            .call(Method::GET, "/v1/devices", Some(token(session)), None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        list["devices"].as_array().expect("devices").clone()
+    }
+}
+
+fn labelled<'a>(name: &'a str, app: &'a str) -> Label<'a> {
+    Label {
+        sent_name: name,
+        sent_app: Some(app),
+        sent_platform: "macos",
+        signed: Some((name.trim(), "macos", app)),
+    }
+}
+
+fn invalid_signature(answer: &(StatusCode, Value)) -> bool {
+    answer.0 == StatusCode::BAD_REQUEST && answer.1["code"] == "invalid_signature"
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_device_that_names_its_app_signs_it_and_the_list_shows_it() {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let email = email();
+    let upload = server.registration_upload(&email, b"pw").await;
+    let keys = DeviceKeys::generate().expect("keys");
+
+    // The name is signed trimmed, as the server stores it.
+    let (status, pending) = server
+        .register_labelled(
+            &email,
+            &upload,
+            &keys,
+            &labelled("  Laptop  ", "engineering"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{pending}");
+    let code = server.code_for(&email).await;
+    let (status, session) = server.verify(&pending["signup_id"], &code).await;
+    assert_eq!(status, StatusCode::CREATED, "{session}");
+    let devices = server.device_list(&session).await;
+    assert_eq!(devices[0]["app"], "engineering");
+    assert_eq!(devices[0]["name"], "Laptop");
+
+    // A new device signs in under the same rule and is listed with its label while pending.
+    let phone = DeviceKeys::generate().expect("keys");
+    let (status, phone_session) = server
+        .login_labelled(&email, b"pw", &phone, &labelled("Phone", "planner"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{phone_session}");
+    assert_eq!(phone_session["device_state"], "pending");
+    let devices = server.device_list(&session).await;
+    let labels: Vec<_> = devices.iter().map(|d| d["app"].clone()).collect();
+    assert!(labels.contains(&json!("planner")), "{labels:?}");
+    assert!(labels.contains(&json!("engineering")), "{labels:?}");
+
+    // A known device that signs in again keeps what is stored; the claim does not rewrite it.
+    let (status, again) = server
+        .login_labelled(&email, b"pw", &keys, &labelled("Renamed", "planner"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    let devices = server.device_list(&session).await;
+    let laptop = devices
+        .iter()
+        .find(|d| d["current"] == true)
+        .expect("laptop");
+    assert_eq!(
+        (&laptop["name"], &laptop["app"]),
+        (&json!("Laptop"), &json!("engineering"))
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_server_refuses_a_label_the_device_did_not_sign() {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let email = email();
+    let upload = server.registration_upload(&email, b"pw").await;
+    let keys = DeviceKeys::generate().expect("keys");
+    let base = labelled("Laptop", "engineering");
+
+    // Each field of the descriptor is covered: the name, the platform and the app.
+    let cases = [
+        Label {
+            sent_name: "Other",
+            ..labelled("Laptop", "engineering")
+        },
+        Label {
+            sent_platform: "linux",
+            ..labelled("Laptop", "engineering")
+        },
+        Label {
+            sent_app: Some("planner"),
+            ..labelled("Laptop", "engineering")
+        },
+        // A label the signature does not mention: the v1 message under a labelled body.
+        Label {
+            signed: None,
+            ..labelled("Laptop", "engineering")
+        },
+        // A v2 signature under a body with no label: the server checks the v1 message.
+        Label {
+            sent_app: None,
+            ..labelled("Laptop", "engineering")
+        },
+    ];
+    for (i, case) in cases.iter().enumerate() {
+        let answer = server.register_labelled(&email, &upload, &keys, case).await;
+        assert!(invalid_signature(&answer), "case {i}: {answer:?}");
+    }
+    // The same device with an honest label is accepted.
+    let (status, body) = server
+        .register_labelled(&email, &upload, &keys, &base)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let code = server.code_for(&email).await;
+    let (status, session) = server.verify(&body["signup_id"], &code).await;
+    assert_eq!(status, StatusCode::CREATED, "{session}");
+
+    // Sign-in is covered the same way.
+    let phone = DeviceKeys::generate().expect("keys");
+    let cases = [
+        Label {
+            sent_name: "Other",
+            ..labelled("Phone", "planner")
+        },
+        Label {
+            sent_platform: "linux",
+            ..labelled("Phone", "planner")
+        },
+        Label {
+            sent_app: Some("engineering"),
+            ..labelled("Phone", "planner")
+        },
+        Label {
+            signed: None,
+            ..labelled("Phone", "planner")
+        },
+        Label {
+            sent_app: None,
+            ..labelled("Phone", "planner")
+        },
+    ];
+    for (i, case) in cases.iter().enumerate() {
+        let answer = server.login_labelled(&email, b"pw", &phone, case).await;
+        assert!(invalid_signature(&answer), "login case {i}: {answer:?}");
+    }
+    assert_eq!(server.device_list(&session).await.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_device_with_no_label_still_signs_the_earlier_messages_and_has_none() {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let email = email();
+    let keys = DeviceKeys::generate().expect("keys");
+    let session = server.register(&email, b"pw", &keys).await;
+    let devices = server.device_list(&session).await;
+    assert_eq!(devices[0]["app"], Value::Null);
+    let phone = DeviceKeys::generate().expect("keys");
+    let signed_in = server.login(&email, b"pw", &phone).await;
+    assert_eq!(signed_in["device_state"], "pending");
+    assert!(
+        server
+            .device_list(&session)
+            .await
+            .iter()
+            .all(|d| d["app"].is_null())
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_label_survives_the_second_factor_step() {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let email = email();
+    let keys = DeviceKeys::generate().expect("keys");
+    let session = server.register(&email, b"pw", &keys).await;
+    let (secret, _) = server.enable_totp(&session, &keys).await;
+
+    // A new device with a label meets the factor; the label rides in the sealed state.
+    let phone = DeviceKeys::generate().expect("keys");
+    let (login, status, started) = server.login_start(&email, b"pw").await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let finish = login
+        .finish(b"pw", &unb64(&started["credential_response"]))
+        .expect("password");
+    let login_id = uuid_of(&started["login_id"]);
+    let public = phone.public();
+    let signature = phone.sign(
+        auth::DEVICE_LOGIN_V2_CONTEXT,
+        &auth::login_message_v2(
+            login_id.as_bytes(),
+            &public,
+            &descriptor(("Phone", "macos", "engineering")),
+        ),
+    );
+    let (status, body) = server
+        .call(
+            Method::POST,
+            "/v1/sessions/login/finish",
+            None,
+            Some(json!({
+                "login_id": started["login_id"],
+                "credential_finalization": b64(&finish.finalization),
+                "device": labelled_device(&labelled("Phone", "engineering"), &public),
+                "device_signature": b64(&signature),
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, signed_in) = server
+        .second_factor(&body["login_id"], Some(&code_for(&secret, 1)), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{signed_in}");
+    let devices = server.device_list(&session).await;
+    let labels: Vec<_> = devices.iter().map(|d| d["app"].clone()).collect();
+    assert!(labels.contains(&json!("engineering")), "{labels:?}");
+    assert_eq!(devices.len(), 2);
+}

@@ -43,6 +43,10 @@ pub const LOGIN_CONTEXT: &[u8] = b"orbyn/opaque-login/v1";
 pub const DEVICE_REGISTER_CONTEXT: &str = "orbyn/device-register/v1";
 /// What a device signs at sign-in: [`login_message`].
 pub const DEVICE_LOGIN_CONTEXT: &str = "orbyn/device-login/v1";
+/// What a device that names its app signs at sign-up: [`register_message_v2`].
+pub const DEVICE_REGISTER_V2_CONTEXT: &str = "orbyn/device-register/v2";
+/// What a device that names its app signs at sign-in: [`login_message_v2`].
+pub const DEVICE_LOGIN_V2_CONTEXT: &str = "orbyn/device-login/v2";
 /// What a trusted device signs to approve another: [`approval_message`].
 pub const DEVICE_APPROVAL_CONTEXT: &str = "orbyn/device-approval/v1";
 /// See [`approval_message_v2`].
@@ -251,6 +255,48 @@ pub fn login_message(login_id: &[u8; 16], keys: &DevicePublic) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 + 64);
     out.extend_from_slice(login_id);
     push_device(&mut out, keys);
+    out
+}
+
+/// What a device says about itself in the v2 messages: the name it shows (trimmed), its platform
+/// and its app, as the `snake_case` words the wire uses (`linux`, `engineering`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Descriptor<'a> {
+    pub name: &'a str,
+    pub platform: &'a str,
+    pub app: &'a str,
+}
+
+fn push_descriptor(out: &mut Vec<u8>, d: &Descriptor<'_>) {
+    push_len_prefixed(out, d.name.as_bytes());
+    push_len_prefixed(out, d.platform.as_bytes());
+    push_len_prefixed(out, d.app.as_bytes());
+}
+
+/// What a device that names its app signs at sign-up, under [`DEVICE_REGISTER_V2_CONTEXT`]: the
+/// [`register_message`] bytes followed by its [`Descriptor`]. The label, the name and the platform
+/// are then the device's own signed claim: the server cannot attach another to this key at
+/// sign-up, and a swap of any of them breaks the signature.
+pub fn register_message_v2(
+    email: &str,
+    upload: &[u8],
+    keys: &DevicePublic,
+    descriptor: &Descriptor<'_>,
+) -> Vec<u8> {
+    let mut out = register_message(email, upload, keys);
+    push_descriptor(&mut out, descriptor);
+    out
+}
+
+/// What a device that names its app signs at sign-in, under [`DEVICE_LOGIN_V2_CONTEXT`]: the
+/// [`login_message`] bytes followed by its [`Descriptor`].
+pub fn login_message_v2(
+    login_id: &[u8; 16],
+    keys: &DevicePublic,
+    descriptor: &Descriptor<'_>,
+) -> Vec<u8> {
+    let mut out = login_message(login_id, keys);
+    push_descriptor(&mut out, descriptor);
     out
 }
 
@@ -728,5 +774,89 @@ mod protection_tests {
         assert_ne!(a, b);
         assert_ne!(DEVICE_APPROVAL_CONTEXT, DEVICE_APPROVAL_V2_CONTEXT);
         assert_ne!(a, approval_message(&pairing));
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    use orbyn_crypto::DeviceKeys;
+
+    fn descriptor() -> Descriptor<'static> {
+        Descriptor {
+            name: "Work laptop",
+            platform: "linux",
+            app: "engineering",
+        }
+    }
+
+    #[test]
+    fn the_v2_messages_extend_the_v1_ones_and_bind_name_platform_and_app() {
+        let keys = DeviceKeys::generate().expect("keys").public();
+        let v1 = register_message("a@example.test", b"upload", &keys);
+        let v2 = register_message_v2("a@example.test", b"upload", &keys, &descriptor());
+        assert!(v2.starts_with(&v1) && v2.len() > v1.len());
+        let other_name = Descriptor {
+            name: "Other",
+            ..descriptor()
+        };
+        let other_platform = Descriptor {
+            platform: "macos",
+            ..descriptor()
+        };
+        let other_app = Descriptor {
+            app: "planner",
+            ..descriptor()
+        };
+        for other in [other_name, other_platform, other_app] {
+            assert_ne!(
+                v2,
+                register_message_v2("a@example.test", b"upload", &keys, &other)
+            );
+        }
+        let id = [9u8; 16];
+        let login_v2 = login_message_v2(&id, &keys, &descriptor());
+        assert!(login_v2.starts_with(&login_message(&id, &keys)));
+        for other in [other_name, other_platform, other_app] {
+            assert_ne!(login_v2, login_message_v2(&id, &keys, &other));
+        }
+    }
+
+    #[test]
+    fn a_field_cannot_slide_into_the_next() {
+        // Length prefixes keep ("ab", "c") apart from ("a", "bc").
+        let keys = DeviceKeys::generate().expect("keys").public();
+        let one = Descriptor {
+            name: "ab",
+            platform: "c",
+            app: "engineering",
+        };
+        let two = Descriptor {
+            name: "a",
+            platform: "bc",
+            app: "engineering",
+        };
+        assert_ne!(
+            register_message_v2("e", b"u", &keys, &one),
+            register_message_v2("e", b"u", &keys, &two)
+        );
+    }
+
+    #[test]
+    fn a_v1_signature_is_not_a_v2_signature_and_the_reverse() {
+        let device = DeviceKeys::generate().expect("keys");
+        let keys = device.public();
+        let v1 = register_message("a@example.test", b"upload", &keys);
+        let v2 = register_message_v2("a@example.test", b"upload", &keys, &descriptor());
+        let signed_v1 = device.sign(DEVICE_REGISTER_CONTEXT, &v1);
+        let signed_v2 = device.sign(DEVICE_REGISTER_V2_CONTEXT, &v2);
+        assert!(orbyn_crypto::verify(&keys, DEVICE_REGISTER_CONTEXT, &v1, &signed_v1).is_ok());
+        assert!(orbyn_crypto::verify(&keys, DEVICE_REGISTER_V2_CONTEXT, &v2, &signed_v2).is_ok());
+        // Neither passes for the other's context or message, so a label cannot be added to or
+        // stripped from a signed claim.
+        assert!(orbyn_crypto::verify(&keys, DEVICE_REGISTER_V2_CONTEXT, &v1, &signed_v1).is_err());
+        assert!(orbyn_crypto::verify(&keys, DEVICE_REGISTER_CONTEXT, &v2, &signed_v2).is_err());
+        assert!(orbyn_crypto::verify(&keys, DEVICE_REGISTER_CONTEXT, &v1, &signed_v2).is_err());
+        assert!(orbyn_crypto::verify(&keys, DEVICE_REGISTER_V2_CONTEXT, &v2, &signed_v1).is_err());
     }
 }

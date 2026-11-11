@@ -10,7 +10,7 @@
 //! local stack, and there the test prints a note and passes without doing anything.
 //! `ORBYN_LOCAL_URL` changes the address (default `http://127.0.0.1:8080`).
 
-use orbyn_contracts::{DevicePlatform, DeviceState};
+use orbyn_contracts::{DeviceApp, DevicePlatform, DeviceState};
 use orbyn_device_client::{
     ClientConfig, DeviceClient, DeviceError, HttpApi, MemoryStore, SignInOutcome, SignUpRequest,
     SystemClock,
@@ -39,6 +39,7 @@ fn client(name: &str) -> DeviceClient<HttpApi, MemoryStore, SystemClock> {
         ClientConfig {
             device_name: name.to_owned(),
             platform: DevicePlatform::Linux,
+            app: Some(DeviceApp::Engineering),
         },
     )
 }

@@ -75,13 +75,9 @@ impl Accounts {
         let invite_id = self.check_invite(client, invite).await?;
         let record = RegistrationUpload::<Suite>::deserialize(upload)
             .map_err(|_| AccountError::InvalidRequest)?;
-        orbyn_crypto::verify(
-            &device.keys,
-            DEVICE_REGISTER_CONTEXT,
-            &register_message(&email, upload, &device.keys),
-            signature,
-        )
-        .map_err(|_| AccountError::InvalidSignature)?;
+        let (context, message) = device.register_proof(&name, &email, upload);
+        orbyn_crypto::verify(&device.keys, context, &message, signature)
+            .map_err(|_| AccountError::InvalidSignature)?;
         let password_file = ServerRegistration::<Suite>::finish(record)
             .serialize()
             .to_vec();

@@ -28,7 +28,7 @@
 //!   in the code's life. A wrong guess at a dead code counts and fails like any other.
 
 use super::{
-    AccountError, Accounts, AuditAction, Client, DeviceState, NewDevice, NewSession, Result,
+    AccountError, Accounts, App, AuditAction, Client, DeviceState, NewDevice, NewSession, Result,
     limits, new_account_id, sessions,
 };
 use crate::mail::{self, Kind, Mail};
@@ -359,9 +359,9 @@ impl Accounts {
         self.step("insert");
         sqlx::query(
             "INSERT INTO pending_signups
-                 (id, email, decoy, password_file, device_name, device_platform,
+                 (id, email, decoy, password_file, device_name, device_platform, device_app,
                   device_signing_key, device_agreement_key, expires_at, invite_id, prefix_digest)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now() + make_interval(mins => $9), $10, $11)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + make_interval(mins => $10), $11, $12)",
         )
         .bind(id)
         .bind(email)
@@ -369,6 +369,7 @@ impl Accounts {
         .bind(password_file)
         .bind(name)
         .bind(device.platform.as_str())
+        .bind(device.app.map(App::as_str))
         .bind(device.keys.signing.as_slice())
         .bind(device.keys.agreement.as_slice())
         .bind(SIGNUP_MINUTES)

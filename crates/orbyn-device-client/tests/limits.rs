@@ -134,6 +134,7 @@ fn client(upload: Upload, fetch: Fetch) -> Client {
         ClientConfig {
             device_name: "Laptop".to_owned(),
             platform: wire::DevicePlatform::Linux,
+            app: None,
         },
     )
 }
