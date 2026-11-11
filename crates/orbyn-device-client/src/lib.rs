@@ -27,3 +27,14 @@ pub use signup::PendingSignUp;
 pub use status::{SyncState, SyncStatus};
 pub use store::{KeyStore, MemoryStore, StoredIdentity, StoredSession};
 pub use sync::{SyncReport, ZoneReport};
+
+// Everything of another Engine crate that this crate's public API exposes, so the app names it
+// from here and never depends on `orbyn-contracts` (rule D6). They are the same types, not copies.
+// `orbyn-client` re-exports the contract types the engine's own signatures use.
+pub use orbyn_client::{
+    Applied, ClientError, Device, DeviceApp, DeviceKeys, DeviceList, DevicePlatform, DevicePublic,
+    Engine, Fields, Local, Peer, PendingApproval, Quarantined, RefusedEnvelope, RejectedFields,
+    Snapshot, Stamp, Trashed,
+};
+pub use orbyn_contracts::{DeviceRemoval, DeviceState};
+pub use zeroize::Zeroizing;
