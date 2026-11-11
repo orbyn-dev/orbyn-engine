@@ -1,0 +1,29 @@
+[package]
+name = "orbyn-device-client"
+license = "MIT OR Apache-2.0"
+description = "The native device client for an Orbyn account: sign-up, sign-in and the calls a desktop app makes, over rustls."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+getrandom.workspace = true
+orbyn-auth-client.workspace = true
+orbyn-contracts.workspace = true
+orbyn-crypto.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
+
+[lints]
+workspace = true

@@ -39,6 +39,9 @@ scripts/local.sh invite create --count 3 --label local
 scripts/local.sh invite list
 scripts/local.sh codes          # the codes the worker "sent" in the last 10 minutes, with their addresses
 scripts/local.sh codes 1h       # a longer window
+scripts/local.sh invite-code        # makes one invite and prints only its code (for scripts and tests)
+scripts/local.sh latest-code a@b.example   # prints only the newest email code for that address
+ORBYN_LOCAL_STACK=1 cargo test -p orbyn-device-client --test local_stack -- --ignored   # the device client end to end against this stack
 scripts/local.sh logs worker    # follow a service's log (default: server)
 ```
 

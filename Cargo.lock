@@ -1876,6 +1876,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbyn-device-client"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.4.3",
+ "orbyn-auth-client",
+ "orbyn-contracts",
+ "orbyn-crypto",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "orbyn-engineering"
 version = "0.1.0"
 dependencies = [
