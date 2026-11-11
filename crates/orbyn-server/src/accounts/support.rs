@@ -106,6 +106,7 @@ impl IntoResponse for Failure {
             }
             AccountError::TotpAlreadyEnabled => (StatusCode::CONFLICT, "totp_already_enabled"),
             AccountError::TotpNotEnabled => (StatusCode::CONFLICT, "totp_not_enabled"),
+            AccountError::TotpSetupExpired => (StatusCode::BAD_REQUEST, "totp_setup_expired"),
             AccountError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             AccountError::DeviceProofRequired => {
                 (StatusCode::UNAUTHORIZED, "device_proof_required")

@@ -954,6 +954,88 @@ async fn the_first_standard_protection_setting_is_open_to_an_old_session_and_not
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
+/// Makes the pending second-factor secret look `minutes` old.
+async fn age_pending(server: &Server, account: Uuid, minutes: i32) {
+    orbyn_core::sqlx::query(
+        "UPDATE account_totp SET created_at = now() - make_interval(mins => $2)
+         WHERE account_id = $1",
+    )
+    .bind(account)
+    .bind(minutes)
+    .execute(server.db.pool())
+    .await
+    .expect("age the pending secret");
+}
+
+async fn recovery_rows(server: &Server, account: Uuid) -> i64 {
+    orbyn_core::sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM totp_recovery_codes WHERE account_id = $1",
+    )
+    .bind(account)
+    .fetch_one(server.db.pool())
+    .await
+    .expect("count")
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_pending_second_factor_secret_expires_ten_minutes_after_it_is_made() {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let email = email();
+    let laptop = DeviceKeys::generate().expect("keys");
+    let session = server.register(&email, b"correct horse", &laptop).await;
+    let account = uuid_of(&session["account_id"]);
+    let post = |path: &'static str, body: Value| {
+        server.call(Method::POST, path, Some(token(&session)), Some(body))
+    };
+    let enrol = || async {
+        let (status, body) = post("/v1/accounts/totp", proof(&session, &laptop, "enrol", "")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        base32_decode(body["secret"].as_str().expect("secret"))
+    };
+    let confirm = |code: String| {
+        post(
+            "/v1/accounts/totp/confirm",
+            confirm_body(&session, &laptop, &code),
+        )
+    };
+    // A pending secret older than ten minutes cannot be confirmed, even with the right code, and a
+    // wrong code gets the same answer: the old secret is never compared with anything. Nothing is
+    // turned on and no recovery code is made.
+    let old = enrol().await;
+    age_pending(&server, account, 11).await;
+    for code in [code_for(&old, 0), wrong_code(&old)] {
+        let (status, body) = confirm(code).await;
+        assert_eq!(
+            (status, &body["code"]),
+            (StatusCode::BAD_REQUEST, &json!("totp_setup_expired")),
+            "{body}"
+        );
+    }
+    assert_eq!(recovery_rows(&server, account).await, 0);
+
+    // Starting again replaces the expired secret, and that one confirms at once (the clock starts
+    // again with each start). The old secret's code is no longer any good.
+    let fresh = enrol().await;
+    assert_ne!(old, fresh);
+    let (status, body) = confirm(code_for(&fresh, 0)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["recovery_codes"].as_array().expect("codes").len(), 10);
+
+    // Just under ten minutes is still fine.
+    let (status, body) = post(
+        "/v1/accounts/totp/disable",
+        proof(&session, &laptop, "disable", ""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let nearly = enrol().await;
+    age_pending(&server, account, 9).await;
+    let (status, body) = confirm(code_for(&nearly, 0)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn a_signature_the_device_cannot_make_is_refused() {
