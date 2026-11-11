@@ -27,10 +27,13 @@ uuid.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 orbyn-auth-client.workspace = true
 orbyn-client.workspace = true
+orbyn-device-client.workspace = true
 orbyn-planner.workspace = true
+orbyn-sync.workspace = true
 tokio-tungstenite = "0.29"
 tower.workspace = true
 tracing-subscriber.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

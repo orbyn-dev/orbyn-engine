@@ -10,14 +10,18 @@ publish.workspace = true
 [dependencies]
 base64.workspace = true
 getrandom.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 orbyn-auth-client.workspace = true
+orbyn-client.workspace = true
 orbyn-contracts.workspace = true
 orbyn-crypto.workspace = true
+orbyn-sync.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 uuid.workspace = true
 zeroize.workspace = true
 

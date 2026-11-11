@@ -56,6 +56,16 @@ pub enum DeviceError {
     /// A value the caller gave is not valid (an email, an address, a name).
     #[error("{0}")]
     InvalidInput(&'static str),
+    /// The zone was deleted, here or on another device.
+    #[error("the zone was deleted")]
+    ZoneDeleted,
+    /// This device has no key for the zone yet: another device sends it.
+    #[error("this device has no key for the zone yet")]
+    NoZoneKey,
+    /// The sync engine refused something (a record, a key, a snapshot). The message never holds
+    /// record content or keys.
+    #[error("sync engine: {0}")]
+    Engine(String),
     /// The server answered something this client does not handle.
     #[error("the server answered {status} {code}")]
     Server { status: u16, code: String },

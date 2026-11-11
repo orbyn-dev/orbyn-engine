@@ -7,8 +7,11 @@ mod api;
 mod client;
 mod clock;
 mod error;
+mod notices;
 mod signup;
+mod status;
 mod store;
+mod sync;
 
 pub use api::{DeviceApi, HttpApi, Method, Request, Response, is_loopback_literal};
 pub use client::{
@@ -17,5 +20,8 @@ pub use client::{
 };
 pub use clock::{Clock, SystemClock};
 pub use error::{DeviceError, StoreError};
+pub use notices::{Notice, NoticeConfig, Notices};
 pub use signup::PendingSignUp;
+pub use status::{SyncState, SyncStatus};
 pub use store::{KeyStore, MemoryStore, StoredIdentity, StoredSession};
+pub use sync::{SyncReport, ZoneReport};
