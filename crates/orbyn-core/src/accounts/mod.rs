@@ -34,6 +34,7 @@ pub mod totp;
 /// device offline for longer would be signed out by expiry anyway.
 pub const TOMBSTONE_DAYS: i32 = 400;
 
+pub use delete::{FRESH_SIGN_IN_SECS, signed_in_recently};
 pub use delete_unused::{DELETE_UNUSED_TTL, REQUEST_JOB_KIND as DELETE_UNUSED_JOB_KIND};
 pub use limits::{Limit, Limits};
 pub use push_tokens::PUSH_TOKEN_DAYS;

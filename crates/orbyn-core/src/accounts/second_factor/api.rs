@@ -109,7 +109,9 @@ impl Accounts {
     }
 
     /// Turns TOTP off. Trusted device only, with its signature and no code: a device that holds
-    /// its key is the person's, and a lost authenticator must not stop them. Any sign-in waiting
+    /// its key is the person's, and a lost authenticator must not stop them. The session must have
+    /// finished its sign-in in the last ten minutes (`reauthentication_required`): the key alone
+    /// is not enough. Any sign-in waiting
     /// for its second factor is closed.
     pub async fn totp_disable(
         &self,

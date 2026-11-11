@@ -586,6 +586,7 @@ fn token(session: &Value) -> &str {
 /// Two accounts' worth of setup: a signed-up account with device A, and device B
 /// signed in and pending.
 struct Pair {
+    email: String,
     a: DeviceKeys,
     a_session: Value,
     b: DeviceKeys,
@@ -601,6 +602,7 @@ async fn pair(server: &Server) -> Pair {
     let b_session = server.login(&email, b"correct horse", &b).await;
     assert_eq!(b_session["device_state"], "pending");
     Pair {
+        email,
         account_id: uuid_of(&a_session["account_id"]),
         a,
         a_session,
@@ -758,6 +760,198 @@ async fn a_wrong_password_and_an_unknown_email_look_the_same() {
         (status, &body["code"]),
         (StatusCode::UNAUTHORIZED, &json!("login_failed"))
     );
+}
+
+/// A 401 `reauthentication_required`: the session's sign-in is older than ten minutes.
+fn needs_a_new_sign_in(answer: &(StatusCode, Value)) -> bool {
+    answer.0 == StatusCode::UNAUTHORIZED && answer.1["code"] == json!("reauthentication_required")
+}
+
+/// The first protection setting, signed now.
+fn first_protection_body(session: &Value, keys: &DeviceKeys, level: &str) -> Value {
+    protection_body(
+        session,
+        keys,
+        level,
+        1,
+        &auth::PROTECTION_GENESIS,
+        chrono_now(),
+    )
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn removing_a_device_changing_protection_and_signing_everyone_out_need_a_recent_sign_in() {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let p = pair(&server).await;
+    server.approve_fully(&p).await; // both devices are trusted now
+    let b_id = uuid_of(&p.b_session["device_id"]);
+    let stale = &p.a_session;
+    server.age_session(&stale["device_id"], 11).await;
+
+    // A stolen key and token are not enough: each change asks for a new sign-in first.
+    let answer = server
+        .remove(token(stale), &p.a, p.account_id, b_id, &p.b.public())
+        .await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+    // The first setting, when Advanced, is one of them (a first Standard is not: see below).
+    let answer = server
+        .call(
+            Method::POST,
+            "/v1/keychain/protection",
+            Some(token(stale)),
+            Some(first_protection_body(stale, &p.a, "advanced")),
+        )
+        .await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+    let answer = server
+        .call(Method::DELETE, "/v1/sessions", Some(token(stale)), None)
+        .await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+    // Signing out only this device stays open, and nothing above changed anything: B is still
+    // trusted and the stale token still works.
+    let (status, list) = server
+        .call(Method::GET, "/v1/devices", Some(token(stale)), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert!(
+        list["devices"]
+            .as_array()
+            .expect("devices")
+            .iter()
+            .any(|d| d["id"] == json!(b_id.to_string()) && d["state"] == json!("trusted")),
+        "{list}"
+    );
+
+    // A wrong password does not refresh anything: a forged finalization is refused and the
+    // session is as stale as before.
+    let (_, _, started) = server.login_start(&p.email, b"correct horse").await;
+    let (status, body) = server.login_finish(&started, &[7u8; 64], &p.a).await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::UNAUTHORIZED, &json!("login_failed"))
+    );
+    let answer = server
+        .remove(token(stale), &p.a, p.account_id, b_id, &p.b.public())
+        .await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+
+    // Signing in again with the password from the same device (the OPAQUE sign-in, which a
+    // trusted device's key finishes without an approval) gives a session that is recent.
+    let fresh = server.login(&p.email, b"correct horse", &p.a).await;
+    assert_eq!(fresh["device_state"], "trusted");
+    assert_eq!(fresh["device_id"], stale["device_id"]);
+    let (status, body) = server
+        .call(
+            Method::POST,
+            "/v1/keychain/protection",
+            Some(token(&fresh)),
+            Some(first_protection_body(&fresh, &p.a, "standard")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = server
+        .remove(token(&fresh), &p.a, p.account_id, b_id, &p.b.public())
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // The second factor: turning it off needs the new sign-in too, and the refusal does not use
+    // up the signature.
+    // Turning it on starts with a new sign-in too, before the secret is shown (a stolen key could
+    // otherwise switch on a factor the thief controls), and the refusal burns no signature.
+    server.age_session(&fresh["device_id"], 11).await;
+    let enrol = proof(&fresh, &p.a, "enrol", "");
+    let post = |path: &'static str, body: Value| {
+        server.call(Method::POST, path, Some(token(&fresh)), Some(body))
+    };
+    let answer = post("/v1/accounts/totp", enrol.clone()).await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+    server.age_session(&fresh["device_id"], 9).await;
+    let (status, enrolment) = post("/v1/accounts/totp", enrol).await;
+    assert_eq!(status, StatusCode::OK, "{enrolment}");
+    let secret = base32_decode(enrolment["secret"].as_str().expect("secret"));
+    // Confirming is not gated: it needs the secret that was shown, which the thief never saw.
+    server.age_session(&fresh["device_id"], 11).await;
+    let (status, confirmed) = post(
+        "/v1/accounts/totp/confirm",
+        confirm_body(&fresh, &p.a, &code_for(&secret, 0)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{confirmed}");
+    let captured = proof_at(&fresh, &p.a, "disable", "", next_signed_at());
+    let answer = server
+        .call(
+            Method::POST,
+            "/v1/accounts/totp/disable",
+            Some(token(&fresh)),
+            Some(captured.clone()),
+        )
+        .await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+    server.age_session(&fresh["device_id"], 9).await;
+    let (status, body) = server
+        .call(
+            Method::POST,
+            "/v1/accounts/totp/disable",
+            Some(token(&fresh)),
+            Some(captured),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Everything signs out only from a recent sign-in.
+    let again = server.login(&p.email, b"correct horse", &p.a).await;
+    let (status, _) = server
+        .call(Method::DELETE, "/v1/sessions", Some(token(&again)), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = server
+        .call(Method::GET, "/v1/devices", Some(token(&again)), None)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_first_standard_protection_setting_is_open_to_an_old_session_and_nothing_after_it_is() {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let p = pair(&server).await;
+    server.age_session(&p.a_session["device_id"], 11).await;
+    let post = |body: Value| {
+        server.call(
+            Method::POST,
+            "/v1/keychain/protection",
+            Some(token(&p.a_session)),
+            Some(body),
+        )
+    };
+    // A first Advanced is refused ...
+    let answer = post(first_protection_body(&p.a_session, &p.a, "advanced")).await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+    // ... a first Standard is accepted, from the same old session ...
+    let first = first_protection_body(&p.a_session, &p.a, "standard");
+    let (status, body) = post(first.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    // ... and the second setting, either level, is refused until the sign-in is recent.
+    let hash = auth::protection_hash(&auth::protection_message(
+        p.account_id.as_bytes(),
+        uuid_of(&p.a_session["device_id"]).as_bytes(),
+        auth::PROTECTION_STANDARD,
+        1,
+        &auth::PROTECTION_GENESIS,
+        first["signed_at"].as_i64().expect("time"),
+    ));
+    for level in ["standard", "advanced"] {
+        let second = protection_body(&p.a_session, &p.a, level, 2, &hash, chrono_now());
+        let answer = post(second).await;
+        assert!(needs_a_new_sign_in(&answer), "{level}: {answer:?}");
+    }
+    server.age_session(&p.a_session["device_id"], 9).await;
+    let second = protection_body(&p.a_session, &p.a, "advanced", 2, &hash, chrono_now());
+    let (status, body) = post(second).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
 #[tokio::test]

@@ -4,8 +4,9 @@ use super::*;
 
 impl Accounts {
     /// A trusted device removes `device_id`, which may be itself, with its
-    /// signature over [`removal_message`] and `sequence`. Its sessions end and
-    /// its open approvals close. The last trusted device stays.
+    /// signature over [`removal_message`] and `sequence`, from a session that finished its
+    /// sign-in in the last ten minutes (`reauthentication_required` otherwise). Its sessions end
+    /// and its open approvals close. The last trusted device stays.
     pub async fn remove_device(
         &self,
         client: &Client,
@@ -37,6 +38,8 @@ impl Accounts {
             sequence,
         );
         verify_signed(&remover, DEVICE_REMOVAL_CONTEXT, &message, signature)?;
+        // A stolen device key is not enough: the password was needed in the last ten minutes.
+        self.require_recent_sign_in(&mut tx, session).await?;
         if target.state == DeviceState::Trusted {
             let trusted: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM devices WHERE account_id = $1 AND state = 'trusted'",

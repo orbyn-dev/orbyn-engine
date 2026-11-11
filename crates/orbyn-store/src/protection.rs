@@ -147,6 +147,18 @@ impl Store {
         {
             return Err(StoreError::InvalidProtectionSignature);
         }
+        // The password must have been used in the last ten minutes, as for removing a device. This
+        // comes before the limiter, so a stale session uses up nothing. The one exception is the
+        // first setting when it is Standard (the default: no downgrade, no escrow destroyed): the
+        // Planner signs it on the person's first real action, which can be days after the device
+        // was paired. Every later setting, and a first one that is Advanced, needs the sign-in.
+        let first_standard = new.seq == 1 && new.level == ProtectionLevel::Standard;
+        if !first_standard {
+            let mut conn = self.pool.acquire().await?;
+            if !orbyn_core::accounts::signed_in_recently(&mut conn, session).await? {
+                return Err(StoreError::ReauthenticationRequired);
+            }
+        }
         // Counted per account, after the signature verified, and only for a setting that is
         // stored: a request that does not fit the chain (a conflict, a replay) and stores nothing
         // gives its slot back, so requests that never fit cannot use up what the owner's valid
