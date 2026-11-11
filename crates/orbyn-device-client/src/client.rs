@@ -151,7 +151,11 @@ pub(crate) fn failure(response: &Response) -> DeviceError {
         .unwrap_or_default();
     match (response.status, code.as_str()) {
         (401, "reauthentication_required") => DeviceError::ReauthenticationRequired,
-        (400, "invalid_email_code") => DeviceError::InvalidCode,
+        (400, "invalid_email_code" | "wrong_code") => DeviceError::InvalidCode,
+        (410, "approval_expired") => DeviceError::ApprovalExpired,
+        (409, "approval_out_of_order" | "approval_not_confirmed") => DeviceError::ApprovalNotReady,
+        (400, "invalid_commitment") => DeviceError::ApprovalMismatch,
+        (409, "last_trusted_device") => DeviceError::LastTrustedDevice,
         (429, _) => DeviceError::RateLimited {
             retry_after: response.retry_after.map(Duration::from_secs),
         },

@@ -2,30 +2,24 @@
 //! two devices, zone keys, push and pull, a conflict, the snapshot, the notices stream and the
 //! status. Ignored unless run with `--include-ignored` and `DATABASE_URL`.
 
-use axum::body::{Body, to_bytes};
-use axum::extract::ConnectInfo;
-use axum::http::{Method, Request, StatusCode, header};
 use orbyn_auth_client as auth;
 use orbyn_client::Engine;
 use orbyn_contracts as wire;
-use orbyn_core::accounts::AuthSecrets;
+use orbyn_core::accounts::{AuthSecrets, Limit, Limits};
 use orbyn_core::{Accounts, Database};
 use orbyn_device_client::{
-    ClientConfig, DeviceClient, DeviceError, HttpApi, KeyStore, MemoryStore, Notice, NoticeConfig,
-    SignInOutcome, SignUpRequest, SyncState, SystemClock,
+    ApproverState, ClientConfig, DeviceApi, DeviceClient, DeviceError, HttpApi, KeyStore,
+    MemoryStore, Notice, NoticeConfig, SignInOutcome, SignUpRequest, SyncState, SystemClock,
 };
 use orbyn_server::{AppState, Readiness, router};
 use orbyn_store::{Hub, Store};
 use orbyn_sync::Fields;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tower::ServiceExt;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -60,7 +54,6 @@ async fn code_sent_to(pool: &orbyn_core::sqlx::PgPool, email: &str) -> String {
 }
 
 struct Server {
-    app: axum::Router,
     db: Database,
     base: String,
 }
@@ -74,8 +67,18 @@ impl Server {
         db.migrate().await.expect("migrate");
         let setup = SETUP.get_or_init(|| AuthSecrets::generate().to_string());
         let secrets = AuthSecrets::from_encoded(setup).expect("setup");
-        let accounts =
-            Accounts::new(db.pool().clone(), secrets).with_signup(orbyn_core::SignupMode::Open);
+        // Every test signs up from the one loopback address: the start throttle is not what these
+        // tests are about.
+        let limits = Limits {
+            signup_start_free_per_prefix: Limit::new(100_000, Duration::from_secs(3600)),
+            signup_start_max_per_prefix: Limit::new(100_000, Duration::from_secs(3600)),
+            register_per_ip: Limit::new(100_000, Duration::from_secs(3600)),
+            login_per_ip: Limit::new(100_000, Duration::from_secs(3600)),
+            ..Limits::default()
+        };
+        let accounts = Accounts::new(db.pool().clone(), secrets)
+            .with_limits(limits)
+            .with_signup(orbyn_core::SignupMode::Open);
         let hub = Hub::start(db.pool().clone());
         let store = Store::new(db.pool().clone(), hub);
         let state = AppState::new(Arc::new(Up))
@@ -86,12 +89,9 @@ impl Server {
             .await
             .expect("bind");
         let address = listener.local_addr().expect("address");
-        let service = app
-            .clone()
-            .into_make_service_with_connect_info::<SocketAddr>();
+        let service = app.into_make_service_with_connect_info::<SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, service).await });
         Self {
-            app,
             db,
             base: format!("http://{address}"),
         }
@@ -109,56 +109,6 @@ impl Server {
             },
         )
     }
-
-    /// A call straight into the app (no socket), for the approval steps.
-    async fn call(
-        &self,
-        method: Method,
-        path: &str,
-        token: &str,
-        body: Option<Value>,
-    ) -> (StatusCode, Value) {
-        let mut request = Request::builder()
-            .method(method)
-            .uri(path)
-            .header(header::AUTHORIZATION, format!("Bearer {token}"));
-        let body = match body {
-            Some(value) => {
-                request = request.header(header::CONTENT_TYPE, "application/json");
-                Body::from(value.to_string())
-            }
-            None => Body::empty(),
-        };
-        let mut request = request.body(body).expect("request");
-        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            40_000,
-        )));
-        let response = self.app.clone().oneshot(request).await.expect("response");
-        let status = response.status();
-        let bytes = to_bytes(response.into_body(), 16 << 20)
-            .await
-            .expect("body");
-        let json = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).expect("json")
-        };
-        (status, json)
-    }
-
-    async fn ok<T: DeserializeOwned>(
-        &self,
-        method: Method,
-        path: &str,
-        token: &str,
-        body: Option<Value>,
-        expected: StatusCode,
-    ) -> T {
-        let (status, value) = self.call(method, path, token, body).await;
-        assert_eq!(status, expected, "{path}: {value}");
-        serde_json::from_value(value).expect("wire type")
-    }
 }
 
 type Client = DeviceClient<HttpApi, MemoryStore, SystemClock>;
@@ -171,7 +121,11 @@ fn email() -> String {
     format!("device-{}@example.test", Uuid::new_v4().simple())
 }
 
-async fn sign_up(server: &Server, client: &Client, email: &str) {
+async fn sign_up<A: DeviceApi>(
+    server: &Server,
+    client: &DeviceClient<A, MemoryStore, SystemClock>,
+    email: &str,
+) {
     let mut pending = client
         .begin_sign_up(SignUpRequest {
             email: email.to_owned(),
@@ -207,119 +161,39 @@ fn now_secs() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
 }
 
-fn value<T: Serialize>(v: &T) -> Value {
-    serde_json::to_value(v).expect("json")
-}
-
-/// The whole two-way approval over HTTP, with the person confirming that both screens show the
-/// same digits (the real client API for this is the next change).
-async fn approve(
-    server: &Server,
-    (approver_token, approver): (&str, &mut Engine),
-    (new_token, new, new_id): (&str, &mut Engine, &str),
-) {
-    let list: wire::DeviceList = server
-        .ok(
-            Method::GET,
-            "/v1/devices",
-            approver_token,
-            None,
-            StatusCode::OK,
-        )
-        .await;
-    let pending = list
-        .devices
-        .iter()
-        .find(|d| d.id == new_id)
-        .expect("the new device is listed")
-        .clone();
-    let (mut pa, create) = approver
-        .start_approval(&pending, now_secs())
+/// The whole two-way approval through the client API, with the person confirming that both
+/// screens show the same digits.
+async fn approve(a: &Client, engine_a: &mut Engine, b: &Client, engine_b: &mut Engine) {
+    let mut approval = a
+        .start_approval(engine_a, &device_id_of(b))
+        .await
         .expect("start");
-    let created: wire::ApprovalCreated = server
-        .ok(
-            Method::POST,
-            "/v1/devices/approvals",
-            approver_token,
-            Some(value(&create)),
-            StatusCode::CREATED,
-        )
-        .await;
-    let step = |name: &str| format!("/v1/devices/approvals/{}/{name}", created.id);
-    let view = current_approval(server, new_token).await;
-    // These devices named their app, so each joins with the description it signed in with
-    // (the honest server lists the same name).
-    let (pd, nonce) = new
-        .join_approval_labelled(
-            &view,
-            now_secs(),
-            &pending.name,
-            wire::DevicePlatform::Linux,
-            wire::DeviceApp::Engineering,
-        )
-        .expect("join");
-    let (status, body) = server
-        .call(Method::POST, &step("nonce"), new_token, Some(value(&nonce)))
-        .await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    let on_approver: wire::PendingApproval = server
-        .ok(
-            Method::GET,
-            &format!("/v1/devices/approvals/{}", created.id),
-            approver_token,
-            None,
-            StatusCode::OK,
-        )
-        .await;
-    let reveal = pa.reveal(&on_approver).expect("reveal");
-    let (status, body) = server
-        .call(
-            Method::POST,
-            &step("reveal"),
-            approver_token,
-            Some(value(&reveal)),
-        )
-        .await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    let view = current_approval(server, new_token).await;
-    let on_new = pd.sas(&view).expect("sas");
-    assert_eq!(pa.sas(), Some(on_new), "both screens show the same digits");
-    let confirm = approver.confirm_approval(pa, &list).expect("confirm");
-    let (status, body) = server
-        .call(
-            Method::POST,
-            &step("confirm"),
-            approver_token,
-            Some(value(&confirm)),
-        )
-        .await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    let view = current_approval(server, new_token).await;
-    let code = new
-        .finish_approval(pd, &view, None, now_secs())
+    let joined = b
+        .join_approval(engine_b)
+        .await
+        .expect("join")
+        .expect("the approval is waiting for the new device");
+    assert_eq!(
+        b.device_digits(&joined).await.expect("early"),
+        None,
+        "no digits before the approver reveals"
+    );
+    let shown = match a.approval_state(&mut approval).await.expect("state") {
+        ApproverState::Digits { digits, .. } => digits,
+        ApproverState::Waiting => panic!("the new device joined"),
+    };
+    let on_new = b
+        .device_digits(&joined)
+        .await
+        .expect("digits")
+        .expect("the approver revealed");
+    assert_eq!(shown, on_new, "both screens show the same digits");
+    a.confirm_approval(engine_a, approval)
+        .await
+        .expect("confirm");
+    b.finish_approval(engine_b, joined, None)
+        .await
         .expect("finish");
-    let (status, body) = server
-        .call(
-            Method::POST,
-            &step("code"),
-            new_token,
-            Some(json!({"code": code})),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-}
-
-async fn current_approval(server: &Server, token: &str) -> wire::PendingApproval {
-    let current: wire::CurrentDevice = server
-        .ok(
-            Method::GET,
-            "/v1/devices/current",
-            token,
-            None,
-            StatusCode::OK,
-        )
-        .await;
-    current.approval.expect("an open approval")
 }
 
 /// One field set on a record, stamped by the engine's clock.
@@ -396,12 +270,7 @@ async fn two_devices_sync_records_keys_and_a_conflict_through_the_real_server() 
     );
 
     // A approves B and hands it the zone key; B's pass takes the key and pulls the record.
-    approve(
-        &server,
-        (&token_of(&a), &mut engine_a),
-        (&token_of(&b), &mut engine_b, &device_id_of(&b)),
-    )
-    .await;
+    approve(&a, &mut engine_a, &b, &mut engine_b).await;
     // Trusted but without the key yet, B stages work: its pass reports it is waiting for the key
     // and fails nothing; the work stays staged.
     set(
@@ -574,12 +443,7 @@ async fn the_notices_stream_tells_a_device_that_another_changed_a_zone() {
         json!("dark"),
     );
     a.sync_all(&mut engine_a).await.expect("pass");
-    approve(
-        &server,
-        (&token_of(&a), &mut engine_a),
-        (&token_of(&b), &mut engine_b, &device_id_of(&b)),
-    )
-    .await;
+    approve(&a, &mut engine_a, &b, &mut engine_b).await;
     let devices = a.devices().await.expect("devices");
     a.send_keys(&mut engine_a, ZONE, &devices)
         .await
@@ -645,12 +509,7 @@ async fn two_trusted_devices(server: &Server) -> (Client, Engine, Client, Engine
         json!("dark"),
     );
     a.sync_all(&mut engine_a).await.expect("pass");
-    approve(
-        server,
-        (&token_of(&a), &mut engine_a),
-        (&token_of(&b), &mut engine_b, &device_id_of(&b)),
-    )
-    .await;
+    approve(&a, &mut engine_a, &b, &mut engine_b).await;
     let devices = a.devices().await.expect("devices");
     a.send_keys(&mut engine_a, ZONE, &devices)
         .await
@@ -790,4 +649,267 @@ async fn a_zone_made_after_the_approval_reaches_the_other_device_with_its_key() 
         field(&engine_b, "engineering.profiles", "p1", "name"),
         Some(json!("fast"))
     );
+}
+
+// ---- approving, denying and removing devices through the client API ---------------------------
+
+/// A signed-up trusted device A and a pending device B of one account, each with an engine.
+async fn pending_pair(server: &Server) -> (Client, Engine, Client, Engine) {
+    let email = email();
+    let a = server.device("Laptop");
+    sign_up(server, &a, &email).await;
+    let b = server.device("Phone");
+    b.sign_in(&email, &password()).await.expect("sign in");
+    let engine_a = a.open_engine(None).expect("engine");
+    let engine_b = b.open_engine(None).expect("engine");
+    (a, engine_a, b, engine_b)
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn either_device_can_deny_and_the_approval_ends() {
+    let server = Server::start().await;
+    let (a, engine_a, b, engine_b) = pending_pair(&server).await;
+    // The approver denies after the new device joined.
+    let mut approval = a
+        .start_approval(&engine_a, &device_id_of(&b))
+        .await
+        .expect("start");
+    assert_eq!(
+        a.approval_state(&mut approval).await.expect("state"),
+        ApproverState::Waiting
+    );
+    let joined = b
+        .join_approval(&engine_b)
+        .await
+        .expect("join")
+        .expect("an approval");
+    a.deny_approval(approval).await.expect("deny");
+    assert_eq!(
+        b.device_digits(&joined).await.err(),
+        Some(DeviceError::ApprovalExpired)
+    );
+    assert_eq!(b.pending_approval().await.expect("current"), None);
+
+    // The new device denies before the approver reveals.
+    let mut approval = a
+        .start_approval(&engine_a, &device_id_of(&b))
+        .await
+        .expect("start again");
+    let joined = b
+        .join_approval(&engine_b)
+        .await
+        .expect("join")
+        .expect("an approval");
+    b.deny_joined(joined).await.expect("deny");
+    assert_eq!(
+        a.approval_state(&mut approval).await.err(),
+        Some(DeviceError::ApprovalExpired)
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn wrong_digits_typed_on_the_new_device_trust_nothing_and_end_the_approval() {
+    let server = Server::start().await;
+    let (a, mut engine_a, b, mut engine_b) = pending_pair(&server).await;
+    let mut approval = a
+        .start_approval(&engine_a, &device_id_of(&b))
+        .await
+        .expect("start");
+    let joined = b
+        .join_approval(&engine_b)
+        .await
+        .expect("join")
+        .expect("an approval");
+    let ApproverState::Digits { digits, .. } =
+        a.approval_state(&mut approval).await.expect("state")
+    else {
+        panic!("the new device joined");
+    };
+    let wrong = if digits == "000000" {
+        "000001"
+    } else {
+        "000000"
+    };
+    a.confirm_approval(&mut engine_a, approval)
+        .await
+        .expect("confirm");
+    assert_eq!(
+        b.finish_approval(&mut engine_b, joined, Some(wrong))
+            .await
+            .err(),
+        Some(DeviceError::ApprovalMismatch)
+    );
+    // Nothing was pinned and the approval is gone: a new one is needed.
+    assert_eq!(b.pending_approval().await.expect("current"), None);
+}
+
+/// A transport that shows the approver another name for the new device.
+struct Lying {
+    inner: HttpApi,
+}
+
+impl DeviceApi for Lying {
+    async fn send(
+        &self,
+        request: orbyn_device_client::Request,
+    ) -> Result<orbyn_device_client::Response, DeviceError> {
+        let list = request.path == "/v1/devices";
+        let mut response = self.inner.send(request).await?;
+        if list {
+            let text = String::from_utf8_lossy(&response.body).replace("\"Phone\"", "\"Tablet\"");
+            response.body = Zeroizing::new(text.into_bytes());
+        }
+        Ok(response)
+    }
+
+    fn base_url(&self) -> Option<&str> {
+        self.inner.base_url()
+    }
+}
+
+/// A transport that answers an approval's creation with another approval's id.
+struct WrongId {
+    inner: HttpApi,
+}
+
+impl DeviceApi for WrongId {
+    async fn send(
+        &self,
+        request: orbyn_device_client::Request,
+    ) -> Result<orbyn_device_client::Response, DeviceError> {
+        let create = request.path == "/v1/devices/approvals";
+        let mut response = self.inner.send(request).await?;
+        if create {
+            let mut body: Value = serde_json::from_slice(&response.body).expect("json");
+            body["id"] = json!("00000000-0000-4000-8000-000000000001");
+            response.body = Zeroizing::new(body.to_string().into_bytes());
+        }
+        Ok(response)
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn an_approval_the_server_answers_with_another_id_is_refused() {
+    let server = Server::start().await;
+    let email = email();
+    let a = DeviceClient::new(
+        WrongId {
+            inner: HttpApi::new(&server.base).expect("loopback"),
+        },
+        MemoryStore::new(),
+        SystemClock,
+        ClientConfig {
+            device_name: "Laptop".to_owned(),
+            platform: wire::DevicePlatform::Linux,
+            app: None,
+        },
+    );
+    sign_up(&server, &a, &email).await;
+    let b = server.device("Phone");
+    b.sign_in(&email, &password()).await.expect("sign in");
+    let engine_a = a.open_engine(None).expect("engine");
+    assert_eq!(
+        a.start_approval(&engine_a, &device_id_of(&b)).await.err(),
+        Some(DeviceError::ApprovalMismatch)
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn an_approver_shown_another_description_cannot_get_past_the_servers_commitment_check() {
+    let server = Server::start().await;
+    let email = email();
+    let a = DeviceClient::new(
+        Lying {
+            inner: HttpApi::new(&server.base).expect("loopback"),
+        },
+        MemoryStore::new(),
+        SystemClock,
+        ClientConfig {
+            device_name: "Laptop".to_owned(),
+            platform: wire::DevicePlatform::Linux,
+            app: Some(wire::DeviceApp::Engineering),
+        },
+    );
+    sign_up(&server, &a, &email).await;
+    let b = server.device("Phone");
+    b.sign_in(&email, &password()).await.expect("sign in");
+    let engine_a = a.open_engine(None).expect("engine");
+    let engine_b = b.open_engine(None).expect("engine");
+
+    // The approver was shown "Tablet", so its commitment covers that name. The server rebuilds
+    // the commitment from the stored "Phone" and refuses the reveal, ending the approval. (A
+    // server that did not check would still be caught by the new device: see the engine tests.)
+    let mut approval = a
+        .start_approval(&engine_a, &device_id_of(&b))
+        .await
+        .expect("start");
+    let joined = b
+        .join_approval(&engine_b)
+        .await
+        .expect("join")
+        .expect("an approval");
+    assert_eq!(
+        a.approval_state(&mut approval).await.err(),
+        Some(DeviceError::ApprovalMismatch)
+    );
+    assert_eq!(
+        b.device_digits(&joined).await.err(),
+        Some(DeviceError::ApprovalExpired)
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_trusted_device_removes_another_and_the_last_one_stays() {
+    let server = Server::start().await;
+    let (a, mut engine_a, b, mut engine_b) = two_trusted_devices(&server).await;
+    let b_id = device_id_of(&b);
+    a.remove_device(&engine_a, &b_id).await.expect("remove");
+    let listed = a.devices().await.expect("devices");
+    assert!(listed.devices.iter().all(|d| d.id != b_id), "{listed:?}");
+    assert_eq!(listed.removals.len(), 1);
+    // The removed device is signed out.
+    assert_eq!(b.devices().await.err(), Some(DeviceError::SessionExpired));
+    // The last trusted device cannot remove itself.
+    assert_eq!(
+        a.remove_device(&engine_a, &device_id_of(&a)).await.err(),
+        Some(DeviceError::LastTrustedDevice)
+    );
+    assert_eq!(
+        a.remove_device(&engine_a, "00000000-0000-4000-8000-000000000000")
+            .await
+            .err(),
+        Some(DeviceError::InvalidInput(
+            "the device is not in the account"
+        ))
+    );
+    let _ = (&mut engine_a, &mut engine_b);
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_device_whose_name_has_spaces_is_approved_with_matching_digits() {
+    let server = Server::start().await;
+    let email = email();
+    let a = server.device("Laptop");
+    sign_up(&server, &a, &email).await;
+    // The host passes the name as the person typed it; the server stores it trimmed, so the new
+    // device must bind the trimmed name into its digits or they would never match.
+    let b = server.device("  Phone  ");
+    b.sign_in(&email, &password()).await.expect("sign in");
+    let mut engine_a = a.open_engine(None).expect("engine");
+    let mut engine_b = b.open_engine(None).expect("engine");
+    approve(&a, &mut engine_a, &b, &mut engine_b).await;
+    let listed = a.devices().await.expect("devices");
+    let phone = listed
+        .devices
+        .iter()
+        .find(|d| d.id == device_id_of(&b))
+        .expect("listed");
+    assert_eq!(phone.name, "Phone");
+    assert_eq!(phone.state, wire::DeviceState::Trusted);
 }

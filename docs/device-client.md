@@ -6,7 +6,7 @@ It ships in three pull requests:
 
 1. **Sign-up and sign-in** (merged). The design, the crate skeleton and sign-up, sign-in, the re-login and sign-out.
 2. **Sync** (this document's second half). Push and pull per zone, zone keys in and out, the notices stream and the status watch.
-3. **Approval and the label.** Approval digits, approve and deny, `devices()`, `remove_device`, and the device `app` label bound into the signed register message (engine#73).
+3. **Approval and the label.** The `app` label bound into the signed register and login messages (merged), the description bound into the approval (merged), and the client API for approval digits, approve and deny, `devices()` and `remove_device` (this document's last section).
 
 ## What the host supplies
 
@@ -62,12 +62,16 @@ Removing a device, turning the second factor off or starting it, changing protec
 | --- | --- |
 | `Transport` | No answer: the network failed or timed out |
 | `ReauthenticationRequired` | 401 `reauthentication_required`: call `reauthenticate` and retry |
-| `InvalidCode` | 400 `invalid_email_code` |
+| `InvalidCode` | 400 `invalid_email_code` or `wrong_code` (the approval digits) |
 | `RateLimited { retry_after }` | 429, with the `Retry-After` seconds when sent |
 | `DeletionScheduled` | 409 `deletion_scheduled` |
 | `AccountGone` | A session call got 401 **and** `POST /v1/accounts/status` answered 200 with a deletion time. Nothing else gives it: the app destroys key material on this error |
 | `SessionExpired` | 401 `unauthorized` and the account is alive, or the status call failed or answered anything but 200 |
 | `TooLarge` | 413 |
+| `ApprovalExpired` | 410 `approval_expired`, or the approval is gone (cancelled, used or older than ten minutes) |
+| `ApprovalNotReady` | 409 `approval_out_of_order` or `approval_not_confirmed`: the other device has not done its step yet |
+| `ApprovalMismatch` | The engine refused the approval (other keys, a reveal that does not match its commitment, other digits, a bad signature) or the server refused the commitment: the approval is cancelled |
+| `LastTrustedDevice` | 409 `last_trusted_device` |
 | `LoginFailed`, `InviteInvalid`, `SecondFactorFailed`, `DeviceNotTrusted` | the matching server code |
 | `NotSignedIn`, `StoreNotEmpty`, `InvalidInput`, `Store`, `Crypto` | local conditions |
 | `Server { status, code }` | anything else, carrying only the status and the machine code |
@@ -101,10 +105,22 @@ The records go in and out as plain fields (`orbyn_sync::Fields`: a value and a s
 
 `notices(config)` opens the live stream (`/v1/sync`, a WebSocket over the same address: `wss` for `https`, and `ws` **only for a loopback IP literal**, so a transport that reports some other `http://` address gets no stream; rustls with ring and the web roots). Frames and messages are capped at 16 KiB (a notice is a few hundred bytes), the connect and handshake have a timeout (ten seconds), and the token is written into a wiped buffer for the sign-in message. It signs in first with the session token, then tells the host: `Connected` (compare every zone now: changes made while disconnected are not replayed), `ZoneChanged { zone, token }`, `Resync`, `Disconnected`, `Rejected { code }`. A notice never carries record data; the host answers one with a pass. The library answers the server's pings as it reads; a connection that hears nothing for the idle timeout (two minutes) is dropped. The stream **reconnects by itself** with a delay that doubles from one second to one minute, with up to a fifth of jitter, and starts again from the first delay once the server says `Ready`. `Rejected { code: "unauthorized" }` stops it: the session is gone, so `reauthenticate` and open a new one. Dropping the handle closes the connection.
 
+## Approving devices
+
+The client only moves messages between the engine and the server, in order. Every signature, the digits and every check are the engine's (`Engine::start_approval`, `join_approval[_labelled]`, `confirm_approval`, `finish_approval`, `sign_removal`); the client signs nothing itself.
+
+**The approver** (a trusted device): `start_approval(engine, device_id)` lists the devices, lets the engine refuse a device it trusts or revoked, and opens the approval. `approval_state(&mut approval)` is asked until it answers `Digits { digits, fingerprint }`: it answers `Waiting` until the new device joined, then reveals this device's nonce once (a server that shows other keys than this device started with cancels the approval: `ApprovalMismatch`). The person compares the digits with the new device. Same: `confirm_approval(engine, approval)` fetches the current device list, signs the approval and the endorsement and sends them (the host then calls `send_keys` for each zone); different or cancelled: `deny_approval`.
+
+**The new device**: `pending_approval()` shows an approval when a trusted device started one. `join_approval(engine)` sends this device's nonce; a device that named its app (`ClientConfig.app`) joins with the name, platform and app it signed in with, so its digits match the approver's only if the approver was shown the same description. `device_digits(&joined)` answers `None` until the approver revealed, then the digits (or `ApprovalMismatch`, cancelling). `finish_approval(engine, joined, typed)` is called when the person confirms or types the approver's digits: the engine checks the reveal, the age, the approver's signature and the endorsement and pins the approver and the devices it endorsed, and only then are the digits sent to the server, once. On any failure nothing new is trusted, the approval is cancelled, and a new one is needed. `deny_joined` cancels.
+
+**Removing**: `remove_device(engine, device_id)` signs the removal with a sequence one above every removal the engine counted. A password sign-in older than ten minutes is `ReauthenticationRequired`; the last trusted device is `LastTrustedDevice`.
+
+The label is the device's own signed claim, never proof of which app is running.
+
 ### Not here yet
 
-The approval flow itself (digits, approve and deny, `remove_device`) and the device `app` label are the next change; the integration test does the approval over HTTP with the engine's own pairing calls until then. The account's protection chain is not signed by the client; the host's first protection setting follows the rules in [architecture.md](architecture.md).
+The account's protection chain is not signed by the client; the host's first protection setting follows the rules in [architecture.md](architecture.md).
 
 ### Tests
 
-`orbyn-server/tests/device_client.rs` runs the client over a real loopback socket against the real server on Postgres: two devices, the zone key, a sealed record that the server holds only as ciphertext, a conflict merged both ways, the snapshot round trip, a pending device refused, offline work kept and sent later, and the notices stream hearing another device's change and being rejected when the session is revoked. `tests/notices.rs` serves the stream by hand to check the sign-in message, the pong, the reconnect and the stop.
+`orbyn-server/tests/device_client.rs` runs the client over a real loopback socket against the real server on Postgres: two devices, the zone key, a sealed record that the server holds only as ciphertext, a conflict merged both ways, the snapshot round trip, a pending device refused, the whole approval through the client API (digits compared, confirmed and finished), a deny from either side, wrong digits typed, a relabelled listing refused by the server's commitment check, a removal and the last device that stays, offline work kept and sent later, and the notices stream hearing another device's change and being rejected when the session is revoked. `tests/notices.rs` serves the stream by hand to check the sign-in message, the pong, the reconnect and the stop.
