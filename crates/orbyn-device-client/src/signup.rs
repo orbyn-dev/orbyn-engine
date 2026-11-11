@@ -15,10 +15,18 @@ const MAX_PROOF_ROUNDS: usize = 2;
 
 /// A sign-up that waits for the emailed code. It holds the new device's keys in memory only: an
 /// abandoned sign-up leaves nothing behind. Drop it to cancel.
+///
+/// Once the code is spent the account exists and the session the server answered with is held
+/// here too (in memory, wiped on drop) until it is saved: if the key store fails at that moment,
+/// the keys and the session stay here and [`DeviceClient::retry_save`] saves them again with no
+/// new code. Dropping it before that leaves an account no device holds; see "A sign-up that
+/// could not be saved" in `docs/device-client.md`.
 pub struct PendingSignUp {
     signup_id: String,
     email: String,
     keys: Option<DeviceKeys>,
+    /// The session of a spent code that is not saved yet.
+    created: Option<Created>,
 }
 
 impl PendingSignUp {
@@ -97,6 +105,7 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
                     signup_id: pending.signup_id,
                     email,
                     keys: Some(keys),
+                    created: None,
                 });
             }
             if response.status != 428 || round == MAX_PROOF_ROUNDS {
@@ -111,15 +120,23 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
     /// Finishes a sign-up with the emailed code (any case, hyphen or not). A wrong code is
     /// [`DeviceError::InvalidCode`] and leaves the sign-up open: try again or ask for a new code.
     /// On success the keys, ids and session are saved and the account exists.
+    ///
+    /// If the code was accepted but the key store failed ([`DeviceError::Store`]), the code is
+    /// spent and the account exists: the keys and the session stay in `pending`, and
+    /// [`DeviceClient::retry_save`] (or this call again, whatever the code) saves them without
+    /// asking the server for anything.
     pub async fn verify_sign_up(
         &self,
         pending: &mut PendingSignUp,
         code: &str,
     ) -> Result<SessionInfo, DeviceError> {
-        let keys = pending
-            .keys
-            .as_ref()
-            .ok_or(DeviceError::InvalidInput("this sign-up is finished"))?;
+        if pending.keys.is_none() {
+            return Err(DeviceError::InvalidInput("this sign-up is finished"));
+        }
+        // A spent code cannot be sent again: finish saving what it made.
+        if pending.created.is_some() {
+            return self.retry_save(pending);
+        }
         // A sign-in finished in between would be overwritten: refuse before the code is spent.
         if self.store.load()?.is_some() {
             return Err(DeviceError::StoreNotEmpty);
@@ -133,8 +150,24 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
                 },
             )
             .await?;
-        let info = self.save_session(&created, keys, &pending.email, None)?;
+        pending.created = Some(created);
+        self.retry_save(pending)
+    }
+
+    /// Saves the keys and the session of a sign-up whose code was spent but whose save failed.
+    /// Nothing is sent to the server. A failure keeps everything in `pending` for another try;
+    /// a key store that already holds a device is [`DeviceError::StoreNotEmpty`]. With nothing
+    /// to save it is [`DeviceError::InvalidInput`].
+    pub fn retry_save(&self, pending: &mut PendingSignUp) -> Result<SessionInfo, DeviceError> {
+        let (Some(keys), Some(created)) = (pending.keys.as_ref(), pending.created.as_ref()) else {
+            return Err(DeviceError::InvalidInput("there is nothing to save"));
+        };
+        if self.store.load()?.is_some() {
+            return Err(DeviceError::StoreNotEmpty);
+        }
+        let info = self.save_session(created, keys, &pending.email, None)?;
         pending.keys = None;
+        pending.created = None;
         Ok(info)
     }
 

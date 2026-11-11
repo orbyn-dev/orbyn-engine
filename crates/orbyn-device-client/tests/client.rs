@@ -6,7 +6,8 @@ mod support;
 use orbyn_contracts::{DeviceApp, DevicePlatform, DeviceState};
 use orbyn_device_client::{
     ClientConfig, Clock, DeviceApi, DeviceClient, DeviceError, HttpApi, KeyStore, MemoryStore,
-    Method, Request, Response, SecondFactor, SignInOutcome, SignUpRequest, StoredIdentity,
+    Method, Request, Response, SecondFactor, SignInOutcome, SignUpRequest, StoreError,
+    StoredIdentity,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -578,5 +579,157 @@ async fn the_app_label_is_signed_at_sign_up_and_sign_in_and_a_client_with_none_s
             None,
             Some(DeviceApp::Engineering)
         ]
+    );
+}
+
+/// A store whose next `failures` saves fail, then behaves as a memory store.
+struct FlakyStore {
+    inner: MemoryStore,
+    failures: std::sync::Mutex<usize>,
+}
+
+impl FlakyStore {
+    fn failing(failures: usize) -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            failures: std::sync::Mutex::new(failures),
+        }
+    }
+}
+
+impl KeyStore for FlakyStore {
+    fn load(&self) -> Result<Option<StoredIdentity>, StoreError> {
+        self.inner.load()
+    }
+
+    fn save(&self, identity: &StoredIdentity) -> Result<(), StoreError> {
+        let mut left = self.failures.lock().expect("lock");
+        if *left > 0 {
+            *left -= 1;
+            return Err(StoreError);
+        }
+        drop(left);
+        self.inner.save(identity)
+    }
+
+    fn clear(&self) -> Result<(), StoreError> {
+        self.inner.clear()
+    }
+}
+
+fn flaky_client(
+    engine: &FakeEngine,
+    failures: usize,
+) -> DeviceClient<FakeEngine, FlakyStore, SharedClock> {
+    DeviceClient::new(
+        engine.clone(),
+        FlakyStore::failing(failures),
+        SharedClock(engine.now.clone()),
+        ClientConfig {
+            device_name: "Laptop".to_owned(),
+            platform: DevicePlatform::Linux,
+            app: None,
+        },
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_save_after_the_code_is_spent_keeps_the_keys_and_retry_save_finishes() {
+    let engine = FakeEngine::new();
+    let a = flaky_client(&engine, 2);
+    let mut pending = a.begin_sign_up(request(None)).await.expect("begin");
+    let code = engine.code_for(NORMAL);
+    // The code is accepted, the save fails: the account exists and the code is spent.
+    assert!(matches!(
+        a.verify_sign_up(&mut pending, &code).await,
+        Err(DeviceError::Store(_))
+    ));
+    assert_eq!(engine.device_count(NORMAL), 1);
+    assert_eq!(a.identity().expect("store"), None, "nothing was saved");
+    let verifies = |engine: &FakeEngine| {
+        engine
+            .log()
+            .iter()
+            .filter(|(path, _)| path.ends_with("email/verify"))
+            .count()
+    };
+    assert_eq!(verifies(&engine), 1);
+
+    // The same call again, whatever the code, retries the save without asking the server.
+    assert!(matches!(
+        a.verify_sign_up(&mut pending, "00000000").await,
+        Err(DeviceError::Store(_))
+    ));
+    assert_eq!(verifies(&engine), 1, "the spent code was not sent again");
+
+    // The store recovered: the keys and the session saved are the ones the server answered with.
+    let session = a.retry_save(&mut pending).expect("retry");
+    assert_eq!(session.device_state, DeviceState::Trusted);
+    assert_eq!(verifies(&engine), 1);
+    let (account, device, email) = a.identity().expect("store").expect("saved");
+    assert_eq!(
+        (account, device, email),
+        (
+            session.account_id.clone(),
+            session.device_id.clone(),
+            NORMAL.to_owned()
+        )
+    );
+    // The saved device key is the one the server knows: it signs a trusted start.
+    a.reauthenticate(&password(PASSWORD))
+        .await
+        .expect("a trusted start with the saved key");
+
+    // Nothing is left to save, and a finished sign-up is not verified again.
+    assert_eq!(
+        a.retry_save(&mut pending).err(),
+        Some(DeviceError::InvalidInput("there is nothing to save"))
+    );
+    assert_eq!(
+        a.verify_sign_up(&mut pending, &code).await.err(),
+        Some(DeviceError::InvalidInput("this sign-up is finished"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_save_with_no_spent_code_or_a_store_that_holds_a_device_saves_nothing() {
+    let engine = FakeEngine::new();
+    let a = flaky_client(&engine, 0);
+    let mut pending = a.begin_sign_up(request(None)).await.expect("begin");
+    assert_eq!(
+        a.retry_save(&mut pending).err(),
+        Some(DeviceError::InvalidInput("there is nothing to save"))
+    );
+
+    // The save fails, and a device lands in the store before the retry: it is never overwritten.
+    let b = flaky_client(&engine, 1);
+    let mut second = b
+        .begin_sign_up(SignUpRequest {
+            email: "other@example.com".to_owned(),
+            password: password(PASSWORD),
+            invite: None,
+        })
+        .await
+        .expect("begin");
+    let code = engine.code_for("other@example.com");
+    assert!(b.verify_sign_up(&mut second, &code).await.is_err());
+    let stored = StoredIdentity {
+        device_keys: orbyn_crypto::DeviceKeys::generate()
+            .expect("keys")
+            .to_bytes(),
+        account_id: "x".into(),
+        device_id: "y".into(),
+        email: "z@example.com".into(),
+        session: None,
+        vault_key: Zeroizing::new([9u8; 32]),
+    };
+    b.store().save(&stored).expect("save");
+    assert_eq!(
+        b.retry_save(&mut second).err(),
+        Some(DeviceError::StoreNotEmpty)
+    );
+    assert_eq!(
+        b.store().load().expect("load").expect("kept").account_id,
+        "x"
     );
 }
