@@ -17,6 +17,7 @@ orbyn-sync = { path = "crates/orbyn-sync" }
 orbyn-core = { path = "crates/orbyn-core" }
 orbyn-planner = { path = "crates/orbyn-planner" }
 orbyn-engineering = { path = "crates/orbyn-engineering" }
+orbyn-device-client = { path = "crates/orbyn-device-client" }
 orbyn-server = { path = "crates/orbyn-server" }
 orbyn-keyservice = { path = "crates/orbyn-keyservice" }
 orbyn-translog = { path = "crates/orbyn-translog" }

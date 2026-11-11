@@ -50,6 +50,7 @@ ALLOWED = {
     "orbyn-contracts": set(),
     "orbyn-core": {"orbyn-auth-client", "orbyn-crypto"},
     "orbyn-crypto": set(),
+    "orbyn-device-client": {"orbyn-auth-client", "orbyn-contracts", "orbyn-crypto"},
     "orbyn-engineering": {"orbyn-sync"},
     "orbyn-keyservice": {"orbyn-crypto", "orbyn-translog"},
     "orbyn-keyservice-client": set(),

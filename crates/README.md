@@ -13,6 +13,7 @@ wire boundary. A device crate never depends on a server crate.
 | [orbyn-translog](orbyn-translog/README.md) | Primitive | The transparency log's Merkle tree, sparse map, proofs and cosignature rules |
 | [orbyn-planner](orbyn-planner/README.md) | Domain | Planner records: tasks, events, lists and repeat rules |
 | [orbyn-engineering](orbyn-engineering/README.md) | Domain | Orbyn Engineering records: its zone names and the settings that follow a person |
+| [orbyn-device-client](orbyn-device-client/README.md) | Device transport | The native, async client for an Orbyn account: sign-up, sign-in, re-login and sign-out over rustls |
 | [orbyn-client](orbyn-client/README.md) | Device provider | The device sync engine: record encryption, uploads, merges and zone keys; no IO |
 | [orbyn-wasm](orbyn-wasm/README.md) | Device consumer | JavaScript bindings for sign-in, device keys and the sync engine |
 | [orbyn-core](orbyn-core/README.md) | Server provider | Configuration, Postgres, migrations, jobs, mail, accounts, feeds and push |
