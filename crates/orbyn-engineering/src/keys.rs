@@ -19,9 +19,12 @@ pub const RESERVED: [&str; 4] = [
 /// Settings that never leave the device. Some hold paths, provider connections or secrets, or only
 /// make sense on one machine. The last four (`default_permission_mode`, `default_project_scripts`,
 /// `enable_agent_browser_access`, `enable_agent_device_access`) widen what agents may do or run
-/// commands: a peer must not be able to loosen another machine, so each is chosen on that
-/// machine. The crate refuses all of them in both directions.
-pub const NOT_SYNCED: [&str; 19] = [
+/// commands, and the last seven (the default model, fallback and text-generation model, effort,
+/// thread environment, engine and model options) raise what a run costs or what it may reach. The
+/// rule: a setting that raises cost or widens what an agent may do never syncs, and when it is
+/// unclear the stricter reading wins. A peer must not be able to loosen another machine, so each
+/// is chosen on that machine. The crate refuses all of them in both directions.
+pub const NOT_SYNCED: [&str; 26] = [
     "environment_icon",
     "keep_awake_during_runs",
     "background_activity_profile",
@@ -41,6 +44,13 @@ pub const NOT_SYNCED: [&str; 19] = [
     "default_project_scripts",
     "enable_agent_browser_access",
     "enable_agent_device_access",
+    "default_model",
+    "fallback_model",
+    "text_generation_model",
+    "default_effort",
+    "default_thread_env_mode",
+    "default_engine",
+    "default_model_options",
 ];
 
 /// What a plain field holds.
@@ -55,8 +65,6 @@ pub enum Kind {
     Bool,
     /// A finite number above 0, up to 10.
     Number,
-    /// An object of option id to one value (text, number or boolean).
-    Options,
     /// A list of text, replaced whole by the last writer.
     Order,
 }
@@ -74,7 +82,6 @@ enum Initial {
     Text(&'static str),
     Bool(bool),
     Number(f64),
-    EmptyObject,
     EmptyList,
 }
 
@@ -85,7 +92,6 @@ impl Spec {
             Initial::Bool(value) => json!(value),
             Initial::Number(value) if value.fract() == 0.0 => json!(value as i64),
             Initial::Number(value) => json!(value),
-            Initial::EmptyObject => json!({}),
             Initial::EmptyList => json!([]),
         }
     }
@@ -111,22 +117,12 @@ pub const SPECS: &[Spec] = &[
         Kind::EnumOrThemeId(THEMES),
         Initial::Text("system")
     ),
-    spec!("default_engine", Kind::Text, Initial::Text("")),
-    spec!("default_model", Kind::Text, Initial::Text("")),
-    spec!("fallback_model", Kind::Text, Initial::Text("")),
-    spec!("text_generation_model", Kind::Text, Initial::Text("")),
-    spec!("default_effort", Kind::Text, Initial::Text("")),
     spec!("branch_name_prefix", Kind::Text, Initial::Text("feat")),
     spec!("branch_name_instructions", Kind::Text, Initial::Text("")),
     spec!(
         "response_streaming_mode",
         Kind::Enum(&["paragraph", "turn"]),
         Initial::Text("paragraph")
-    ),
-    spec!(
-        "default_thread_env_mode",
-        Kind::Enum(&["local", "worktree"]),
-        Initial::Text("local")
     ),
     spec!(
         "branch_naming_mode",
@@ -146,7 +142,6 @@ pub const SPECS: &[Spec] = &[
     spec!("auto_thread_titles", Kind::Bool, Initial::Bool(true)),
     spec!("open_web_links_in_app", Kind::Bool, Initial::Bool(false)),
     spec!("preview_zoom", Kind::Number, Initial::Number(1.0)),
-    spec!("default_model_options", Kind::Options, Initial::EmptyObject),
     spec!("model_order", Kind::Order, Initial::EmptyList),
 ];
 

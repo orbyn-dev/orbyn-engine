@@ -17,8 +17,7 @@ pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// A removal (a `null` field) older than this, measured against the stamp of a local write, is
 /// dropped by that write: 90 days.
 pub const COMPACT_AFTER_MS: u64 = 90 * 24 * 60 * 60 * 1000;
-/// The most entries of a list: members of a set, keybinding rules, `model_order` and the entries
-/// of `default_model_options`.
+/// The most entries of a list: members of a set, keybinding rules and `model_order`.
 pub const MAX_ENTRIES: usize = 500;
 
 pub use crate::keys::NOT_SYNCED;
@@ -110,14 +109,6 @@ fn valid_element(value: &Value) -> Option<&str> {
     value.as_str().filter(|id| (1..=512).contains(&id.len()))
 }
 
-fn scalar(value: &Value) -> bool {
-    match value {
-        Value::String(_) | Value::Bool(_) => true,
-        Value::Number(n) => n.as_f64().is_some_and(f64::is_finite),
-        _ => false,
-    }
-}
-
 fn valid_plain(spec: &Spec, value: &Value) -> bool {
     match spec.kind {
         Kind::Text => value.is_string(),
@@ -129,12 +120,6 @@ fn valid_plain(spec: &Spec, value: &Value) -> bool {
         Kind::Number => value
             .as_f64()
             .is_some_and(|n| n.is_finite() && n > 0.0 && n <= 10.0),
-        Kind::Options => value.as_object().is_some_and(|map| {
-            map.len() <= MAX_ENTRIES
-                && map
-                    .iter()
-                    .all(|(k, v)| (1..=128).contains(&k.len()) && scalar(v))
-        }),
         Kind::Order => value
             .as_array()
             .is_some_and(|list| list.len() <= MAX_ENTRIES && list.iter().all(Value::is_string)),
