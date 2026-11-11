@@ -32,6 +32,12 @@ The **zone-key cache is not here.** The host keeps zone keys in its own sealed s
 
 The result is a `PendingSignUp`. It holds the new device's keys **in memory only**: nothing is stored, and dropping it cancels, so an abandoned sign-up leaves nothing behind. `verify_sign_up(&mut pending, code)` sends the emailed code (any case; spaces and hyphens ignored). A wrong code is `InvalidCode` and leaves the sign-up open; `resend_sign_up` asks for a new one. Only on success are the keys, ids, session and a fresh vault key saved. A store that already holds a device is refused up front (`StoreNotEmpty`), and again before the code is sent, so a sign-in that finished in between is never overwritten and the code is not spent.
 
+### A sign-up that could not be saved
+
+The code is spent when the server accepts it: the account exists from then on. If the key store then fails, `verify_sign_up` returns `DeviceError::Store` and the **keys and the session stay in the `PendingSignUp`**, in memory, wiped on drop. `retry_save(&mut pending)` saves them again and sends nothing to the server, so there is no new code and no second account; calling `verify_sign_up` again does the same whatever code is passed. A store that now holds a device is `StoreNotEmpty`.
+
+If the `PendingSignUp` is dropped first (the app quits, or the store never recovers), the account exists and no device holds its keys. The address cannot sign up again, and signing in would need a device that does not exist. The way out is the delete-unused link: ask for it from the sign-in screen's "my sign-up did not finish" path (`POST /v1/accounts/delete-unused {email}`, always answered 202), open the link in the email that comes within 24 hours, and the server erases the account, which was never used, and releases its invite (see `docs/architecture.md`, "Deleting an unused account"); then sign up again. A host shows this path when `verify_sign_up` ended in `Store` and the person leaves without a successful `retry_save`.
+
 ## Sign-in
 
 `sign_in(email, password)` runs OPAQUE login. A wrong password fails **on the device** (`LoginFailed`) and nothing more is sent.
