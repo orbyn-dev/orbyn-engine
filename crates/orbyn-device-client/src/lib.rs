@@ -4,6 +4,7 @@
 //! `docs/device-client.md`.
 
 mod api;
+mod approvals;
 mod client;
 mod clock;
 mod error;
@@ -14,6 +15,7 @@ mod store;
 mod sync;
 
 pub use api::{DeviceApi, HttpApi, Method, Request, Response, is_loopback_literal};
+pub use approvals::{ApproverApproval, ApproverState, JoinedApproval};
 pub use client::{
     ClientConfig, DeviceClient, Password, SecondFactor, SecondFactorChallenge, SessionInfo,
     SignInOutcome, SignUpRequest,

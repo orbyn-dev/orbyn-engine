@@ -17,7 +17,7 @@ pub enum DeviceError {
     /// [`crate::DeviceClient::reauthenticate`] and send the same request again.
     #[error("sign in again to do this")]
     ReauthenticationRequired,
-    /// The emailed code, or a second-factor code, is wrong or has expired.
+    /// The emailed code, a second-factor code or the approval digits are wrong or have expired.
     #[error("the code is wrong or has expired")]
     InvalidCode,
     /// Too many attempts; try again after `retry_after` when the server said when.
@@ -56,6 +56,20 @@ pub enum DeviceError {
     /// A value the caller gave is not valid (an email, an address, a name).
     #[error("{0}")]
     InvalidInput(&'static str),
+    /// The approval ended: ten minutes passed, or either device cancelled or answered wrongly.
+    /// Start a new one.
+    #[error("the approval ended")]
+    ApprovalExpired,
+    /// The other device has not done its step yet; ask again shortly.
+    #[error("the other device has not answered yet")]
+    ApprovalNotReady,
+    /// The two devices did not agree, or the server showed this device something other than what
+    /// the approval was made with. The approval is cancelled; start a new one.
+    #[error("the approval did not match")]
+    ApprovalMismatch,
+    /// The last trusted device cannot be removed.
+    #[error("this is the account's last trusted device")]
+    LastTrustedDevice,
     /// The zone was deleted, here or on another device.
     #[error("the zone was deleted")]
     ZoneDeleted,
