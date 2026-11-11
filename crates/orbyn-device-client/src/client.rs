@@ -15,6 +15,29 @@ use serde::de::DeserializeOwned;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+/// A session as the server answers it. The token is wiped when this is dropped.
+#[derive(serde::Deserialize, zeroize::ZeroizeOnDrop)]
+pub(crate) struct Created {
+    token: String,
+    #[zeroize(skip)]
+    pub(crate) account_id: String,
+    #[zeroize(skip)]
+    pub(crate) device_id: String,
+    #[zeroize(skip)]
+    pub(crate) device_state: wire::DeviceState,
+    #[zeroize(skip)]
+    pub(crate) expires_at: String,
+}
+
+/// The body of `login/second-factor`, written straight into a wiped buffer so the code is never
+/// copied into a `String` that is dropped without being wiped.
+#[derive(Serialize)]
+struct SecondFactorBody<'a> {
+    login_id: &'a str,
+    code: Option<&'a str>,
+    recovery_code: Option<&'a str>,
+}
+
 /// A password. Wiped when dropped.
 pub type Password = Zeroizing<String>;
 
@@ -96,8 +119,10 @@ pub(crate) fn protocol() -> DeviceError {
     }
 }
 
-pub(crate) fn json<T: Serialize>(value: &T) -> Result<Vec<u8>, DeviceError> {
-    serde_json::to_vec(value).map_err(|_| DeviceError::Crypto)
+pub(crate) fn json<T: Serialize>(value: &T) -> Result<Zeroizing<Vec<u8>>, DeviceError> {
+    serde_json::to_vec(value)
+        .map(Zeroizing::new)
+        .map_err(|_| DeviceError::Crypto)
 }
 
 pub(crate) fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, DeviceError> {
@@ -175,7 +200,7 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         method: Method,
         path: &str,
         bearer: Option<Zeroizing<String>>,
-        body: Option<Vec<u8>>,
+        body: Option<Zeroizing<Vec<u8>>>,
     ) -> Result<Response, DeviceError> {
         self.api
             .send(Request {
@@ -209,7 +234,7 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         &self,
         method: Method,
         path: &str,
-        body: Option<Vec<u8>>,
+        body: Option<Zeroizing<Vec<u8>>>,
     ) -> Result<Response, DeviceError> {
         let identity = self.store.load()?.ok_or(DeviceError::NotSignedIn)?;
         let session = identity.session.as_ref().ok_or(DeviceError::NotSignedIn)?;
@@ -329,7 +354,7 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
             )
             .await?;
         if is_ok(&response) {
-            let created: wire::SessionCreated = parse(&response.body)?;
+            let created: Created = parse(&response.body)?;
             return self.finish_sign_in(&created, &keys, email, existing.as_ref());
         }
         if response.status == 401
@@ -355,20 +380,27 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         challenge: &SecondFactorChallenge,
         factor: SecondFactor,
     ) -> Result<SignInOutcome, DeviceError> {
-        let (code, recovery_code) = match factor {
-            SecondFactor::Code(code) => (Some(code.to_string()), None),
-            SecondFactor::Recovery(code) => (None, Some(code.to_string())),
+        let (code, recovery_code) = match &factor {
+            SecondFactor::Code(code) => (Some(code.as_str()), None),
+            SecondFactor::Recovery(code) => (None, Some(code.as_str())),
         };
-        let created: wire::SessionCreated = self
-            .post(
+        let body = json(&SecondFactorBody {
+            login_id: &challenge.login_id,
+            code,
+            recovery_code,
+        })?;
+        let response = self
+            .call(
+                Method::Post,
                 "/v1/sessions/login/second-factor",
-                &wire::SecondFactorLogin {
-                    login_id: challenge.login_id.clone(),
-                    code,
-                    recovery_code,
-                },
+                None,
+                Some(body),
             )
             .await?;
+        if !is_ok(&response) {
+            return Err(failure(&response));
+        }
+        let created: Created = parse(&response.body)?;
         let existing = self.store.load()?;
         self.finish_sign_in(
             &created,
@@ -380,7 +412,7 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
 
     fn finish_sign_in(
         &self,
-        created: &wire::SessionCreated,
+        created: &Created,
         keys: &DeviceKeys,
         email: &str,
         existing: Option<&StoredIdentity>,
@@ -396,14 +428,19 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
     /// across sign-ins.
     pub(crate) fn save_session(
         &self,
-        created: &wire::SessionCreated,
+        created: &Created,
         keys: &DeviceKeys,
         email: &str,
         existing: Option<&StoredIdentity>,
     ) -> Result<SessionInfo, DeviceError> {
+        // The vault key is kept across sign-ins of the same account. A different account (the old
+        // one was deleted and the address signed up again) gets a new one, so it can never open
+        // the old account's snapshot.
         let vault_key = match existing {
-            Some(identity) => identity.vault_key.clone(),
-            None => {
+            Some(identity) if identity.account_id == created.account_id => {
+                identity.vault_key.clone()
+            }
+            _ => {
                 let mut key = Zeroizing::new([0u8; 32]);
                 getrandom::fill(key.as_mut_slice()).map_err(|_| DeviceError::Crypto)?;
                 key

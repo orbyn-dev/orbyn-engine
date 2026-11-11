@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -85,8 +86,19 @@ struct State {
     proofs_spent: HashSet<u32>,
     register_limit: Option<u64>,
     deleted: HashSet<String>,
+    status_mode: StatusMode,
     counter: u64,
     log: Vec<(String, String)>,
+}
+
+/// How `POST /v1/accounts/status` behaves.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StatusMode {
+    Normal,
+    /// Answers 500.
+    ServerError,
+    /// Answers nothing: a transport failure.
+    Unreachable,
 }
 
 /// The fake. Cloning shares the one server.
@@ -100,7 +112,7 @@ fn answer(status: u16, body: Value) -> Result<Response, DeviceError> {
     Ok(Response {
         status,
         retry_after: None,
-        body: serde_json::to_vec(&body).expect("json"),
+        body: Zeroizing::new(serde_json::to_vec(&body).expect("json")),
     })
 }
 
@@ -124,6 +136,7 @@ impl FakeEngine {
                 proofs_spent: HashSet::new(),
                 register_limit: None,
                 deleted: HashSet::new(),
+                status_mode: StatusMode::Normal,
                 counter: 0,
                 log: Vec::new(),
             })),
@@ -172,6 +185,17 @@ impl FakeEngine {
         s.deleted.insert(id);
     }
 
+    /// Ends every session of the account elsewhere; the account stays.
+    pub fn revoke_sessions(&self, email: &str) {
+        let mut s = self.state.lock().expect("lock");
+        let id = s.accounts[email].id.clone();
+        s.sessions.retain(|_, v| v.account != id);
+    }
+
+    pub fn status_mode(&self, mode: StatusMode) {
+        self.state.lock().expect("lock").status_mode = mode;
+    }
+
     pub fn advance(&self, secs: i64) {
         self.now.fetch_add(secs, Ordering::SeqCst);
     }
@@ -213,6 +237,11 @@ impl FakeEngine {
             (Method::Post, "/v1/sessions/login/finish") => login_finish(&mut s, &body, now),
             (Method::Post, "/v1/sessions/login/second-factor") => second_factor(&mut s, &body, now),
             (Method::Post, "/v1/accounts/status") => {
+                match s.status_mode {
+                    StatusMode::ServerError => return error(500, "internal"),
+                    StatusMode::Unreachable => return Err(DeviceError::Transport),
+                    StatusMode::Normal => {}
+                }
                 let id = body["account_id"].as_str().unwrap_or_default();
                 let deleted = if s.deleted.contains(id) {
                     "2026-11-12T00:00:00Z"
@@ -255,8 +284,10 @@ fn register_start(s: &mut State, body: &Value) -> Result<Response, DeviceError> 
         return Ok(Response {
             status: 429,
             retry_after: Some(after),
-            body: serde_json::to_vec(&json!({"code": "too_many_attempts", "message": "x"}))
-                .expect("json"),
+            body: Zeroizing::new(
+                serde_json::to_vec(&json!({"code": "too_many_attempts", "message": "x"}))
+                    .expect("json"),
+            ),
         });
     }
     let email = normalize_email(body["email"].as_str().unwrap_or_default()).expect("email");

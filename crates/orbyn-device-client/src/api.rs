@@ -15,21 +15,42 @@ pub enum Method {
     Delete,
 }
 
-/// One request: a path under the engine's address, an optional bearer token and a JSON body.
-#[derive(Debug)]
+/// One request: a path under the engine's address, an optional bearer token and a JSON body. The
+/// body can hold a code or a key exchange message, so it is wiped on drop and **never printed**:
+/// `Debug` shows the method, the path and the body's length only, so a logging wrapper or a test
+/// double around [`DeviceApi`] cannot leak it.
 pub struct Request {
     pub method: Method,
     pub path: String,
     pub bearer: Option<Zeroizing<String>>,
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Zeroizing<Vec<u8>>>,
 }
 
-/// One answer: the status, the `Retry-After` seconds when there is one, and the body.
-#[derive(Debug)]
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field("body_len", &self.body.as_ref().map(|b| b.len()))
+            .finish_non_exhaustive()
+    }
+}
+
+/// One answer: the status, the `Retry-After` seconds when there is one, and the body (wiped on
+/// drop; it can hold a session token). `Debug` shows the status and the body's length only.
 pub struct Response {
     pub status: u16,
     pub retry_after: Option<u64>,
-    pub body: Vec<u8>,
+    pub body: Zeroizing<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Response")
+            .field("status", &self.status)
+            .field("body_len", &self.body.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One call to the engine. A failure to get any answer is [`DeviceError::Transport`].
@@ -56,6 +77,7 @@ pub fn is_loopback_literal(address: &str) -> bool {
 pub struct HttpApi {
     client: reqwest::Client,
     base: String,
+    max_body: u64,
 }
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -92,7 +114,15 @@ impl HttpApi {
         Ok(Self {
             client,
             base: url.as_str().trim_end_matches('/').to_owned(),
+            max_body: MAX_BODY,
         })
+    }
+
+    /// A smaller cap on a response body, in bytes (the default is 32 MiB). It is enforced while
+    /// reading, whether or not the server sent a `Content-Length`.
+    pub fn with_body_limit(mut self, bytes: u64) -> Self {
+        self.max_body = bytes;
+        self
     }
 }
 
@@ -111,23 +141,26 @@ impl DeviceApi for HttpApi {
         if let Some(body) = request.body {
             builder = builder
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body);
+                .body(body.to_vec());
         }
-        let response = builder.send().await.map_err(|_| DeviceError::Transport)?;
+        let mut response = builder.send().await.map_err(|_| DeviceError::Transport)?;
         let status = response.status().as_u16();
         let retry_after = response
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<u64>().ok());
-        if response.content_length().is_some_and(|n| n > MAX_BODY) {
+        if response.content_length().is_some_and(|n| n > self.max_body) {
             return Err(DeviceError::Transport);
         }
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| DeviceError::Transport)?
-            .to_vec();
+        // Read with a running limit: a server that sends no Content-Length, or lies, is stopped too.
+        let mut body = Zeroizing::new(Vec::new());
+        while let Some(chunk) = response.chunk().await.map_err(|_| DeviceError::Transport)? {
+            if body.len() as u64 + chunk.len() as u64 > self.max_body {
+                return Err(DeviceError::Transport);
+            }
+            body.extend_from_slice(&chunk);
+        }
         Ok(Response {
             status,
             retry_after,

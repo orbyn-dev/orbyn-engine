@@ -2,8 +2,8 @@
 
 use crate::api::Method;
 use crate::client::{
-    DeviceClient, SessionInfo, SignUpRequest, decode, encode, failure, is_ok, json, normalise_code,
-    parse, protocol,
+    Created, DeviceClient, SessionInfo, SignUpRequest, decode, encode, failure, is_ok, json,
+    normalise_code, parse, protocol,
 };
 use crate::error::DeviceError;
 use crate::{Clock, DeviceApi, KeyStore};
@@ -122,7 +122,11 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
             .keys
             .as_ref()
             .ok_or(DeviceError::InvalidInput("this sign-up is finished"))?;
-        let created: wire::SessionCreated = self
+        // A sign-in finished in between would be overwritten: refuse before the code is spent.
+        if self.store.load()?.is_some() {
+            return Err(DeviceError::StoreNotEmpty);
+        }
+        let created: Created = self
             .post(
                 "/v1/accounts/email/verify",
                 &wire::EmailVerify {

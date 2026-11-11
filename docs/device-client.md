@@ -22,13 +22,15 @@ It ships in three pull requests:
 
 Only what has to outlive a run: the **device keys** (Ed25519 and X25519 secrets), the **account id, device id and email** (identifiers: the email is kept so a re-login needs only the password), the **session token** with its expiry, and the **vault key**. The vault key is 32 random bytes made once on this device; the host seals its own snapshot under it. It is not derived from the password and never leaves the device.
 
+The vault key is kept across sign-ins of the **same account**. If the account id changes (the old account was deleted and the address signed up again), the device gets a **new** vault key, so the new account can never open the old account's snapshot.
+
 The **zone-key cache is not here.** The host keeps zone keys in its own sealed snapshot, so the OS keychain holds one small entry, not a growing store. The OPAQUE export key is never kept. Nothing secret appears in a `Debug` print or an error.
 
 ## Sign-up
 
 `begin_sign_up(SignUpRequest { email, password, invite })` runs OPAQUE registration on the device (`register/start`, then the upload), generates the device keys, signs the `orbyn/device-register/v1` message and sends `register/finish`. If the server answers 428 `proof_required`, the client **solves the proof of work itself** (`orbyn_crypto::pow::solve_from`, from a random start, on a blocking thread, at most two rounds) and sends the same request again with the proof. The password is wiped once OPAQUE has used it, and no request body contains it or any encoding of it.
 
-The result is a `PendingSignUp`. It holds the new device's keys **in memory only**: nothing is stored, and dropping it cancels, so an abandoned sign-up leaves nothing behind. `verify_sign_up(&mut pending, code)` sends the emailed code (any case; spaces and hyphens ignored). A wrong code is `InvalidCode` and leaves the sign-up open; `resend_sign_up` asks for a new one. Only on success are the keys, ids, session and a fresh vault key saved. A store that already holds a device is refused up front (`StoreNotEmpty`).
+The result is a `PendingSignUp`. It holds the new device's keys **in memory only**: nothing is stored, and dropping it cancels, so an abandoned sign-up leaves nothing behind. `verify_sign_up(&mut pending, code)` sends the emailed code (any case; spaces and hyphens ignored). A wrong code is `InvalidCode` and leaves the sign-up open; `resend_sign_up` asks for a new one. Only on success are the keys, ids, session and a fresh vault key saved. A store that already holds a device is refused up front (`StoreNotEmpty`), and again before the code is sent, so a sign-in that finished in between is never overwritten and the code is not spent.
 
 ## Sign-in
 
@@ -57,18 +59,18 @@ Removing a device, turning the second factor off or starting it, changing protec
 | `InvalidCode` | 400 `invalid_email_code` |
 | `RateLimited { retry_after }` | 429, with the `Retry-After` seconds when sent |
 | `DeletionScheduled` | 409 `deletion_scheduled` |
-| `AccountGone` | A session call got 401 and `POST /v1/accounts/status` says the account was deleted |
-| `SessionExpired` | 401 `unauthorized` and the account still exists |
+| `AccountGone` | A session call got 401 **and** `POST /v1/accounts/status` answered 200 with a deletion time. Nothing else gives it: the app destroys key material on this error |
+| `SessionExpired` | 401 `unauthorized` and the account is alive, or the status call failed or answered anything but 200 |
 | `TooLarge` | 413 |
 | `LoginFailed`, `InviteInvalid`, `SecondFactorFailed`, `DeviceNotTrusted` | the matching server code |
 | `NotSignedIn`, `StoreNotEmpty`, `InvalidInput`, `Store`, `Crypto` | local conditions |
 | `Server { status, code }` | anything else, carrying only the status and the machine code |
 
-An error never carries a password, a token, a code, a key or a URL.
+An error never carries a password, a token, a code, a key or a URL. `Request` and `Response` print their method, path or status and **the body's length only**, never the body, and their bodies are wiped on drop, so a logging wrapper or a test double around `DeviceApi` cannot leak a session token or a code. The second-factor code is written straight into a wiped buffer, and the session token is wiped when the answer that carried it is dropped.
 
 ## The transport
 
-`HttpApi` is reqwest with **rustls and ring only** (no OpenSSL, no aws-lc). **Redirects are off**: a redirect could carry the bearer token elsewhere, and a redirect is returned as an answer. The address must be `https`, or `http` to a **loopback IP literal** (`127.0.0.1`, `[::1]`) for a local stack, with no user info, query or path. A name such as `localhost` is not a loopback literal, because a name can be made to point anywhere. `is_loopback_literal(address)` is public so the app's "local only" gate can use the same test. Calls time out at 30 seconds, connects at 10, and a response body is capped at 32 MiB.
+`HttpApi` is reqwest with **rustls and ring only** (no OpenSSL, no aws-lc). **Redirects are off**: a redirect could carry the bearer token elsewhere, and a redirect is returned as an answer. The address must be `https`, or `http` to a **loopback IP literal** (`127.0.0.1`, `[::1]`) for a local stack, with no user info, query or path. A name such as `localhost` is not a loopback literal, because a name can be made to point anywhere. `is_loopback_literal(address)` is public so the app's "local only" gate can use the same test. Calls time out at 30 seconds, connects at 10, and a response body is capped at 32 MiB (`with_body_limit` lowers it), counted **while reading**, so a server that sends no `Content-Length`, or lies about it, is stopped too.
 
 ## Tests
 

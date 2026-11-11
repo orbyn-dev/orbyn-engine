@@ -36,7 +36,7 @@ case "${1:-}" in
   # For scripts and tests: only the value, nothing else on stdout.
   invite-code)  need_env; ensure_db; dc run --rm --no-deps server invite create --count 1 --label "${2:-script}" 2>/dev/null | grep -Eo '[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}' | head -n 1;;
   latest-code)  [ -n "${2:-}" ] || { echo "usage: scripts/local.sh latest-code <email>" >&2; exit 2; }
-                dc logs --no-log-prefix --since "${3:-10m}" worker 2>/dev/null | grep -F " for $(printf '%s' "$2" | tr 'A-Z' 'a-z')" | grep -Eo 'code [2-9A-Z]{4}-[2-9A-Z]{4}' | tail -n 1 | cut -d' ' -f2;;
+                dc logs --no-log-prefix --since "${3:-10m}" worker 2>/dev/null | grep -F " for $(printf '%s' "$2" | tr 'A-Z' 'a-z')\"" | grep -Eo 'code [2-9A-Z]{4}-[2-9A-Z]{4}' | tail -n 1 | cut -d' ' -f2;;
   logs)    dc logs -f "${2:-server}";;
   reset)   dc stop server worker >/dev/null 2>&1 || true; ensure_db; dc exec -T postgres psql -U orbyn -d postgres -c "DROP DATABASE IF EXISTS orbyn_local WITH (FORCE)" >/dev/null; echo "orbyn_local dropped; scripts/local.sh up makes it again";;   # test data only
   *) echo "usage: scripts/local.sh setup|up|down|status|invite [create --count N --label L|list]|codes [since]|invite-code [label]|latest-code <email> [since]|logs [service]|reset" >&2; exit 2;;
