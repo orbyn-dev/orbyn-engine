@@ -2,9 +2,12 @@
 
 use super::*;
 
+/// How long a pending second-factor secret can be confirmed: ten minutes after it was made.
+pub const PENDING_SECRET_SECS: i32 = 10 * 60;
+
 impl Accounts {
     /// Starts enrolment: a new secret, held pending until `totp_confirm`. Starting again replaces
-    /// a pending secret. Trusted device only. An account that already has TOTP on must turn it
+    /// a pending secret, an expired one included. Trusted device only. An account that already has TOTP on must turn it
     /// off first.
     pub async fn totp_enrol(
         &self,
@@ -51,7 +54,9 @@ impl Accounts {
     }
 
     /// Turns TOTP on with a current code from the pending secret, and returns the one-time
-    /// recovery codes. They are shown now and never again; any earlier ones are replaced.
+    /// recovery codes. They are shown now and never again; any earlier ones are replaced. A
+    /// pending secret expires [`PENDING_SECRET_SECS`] (ten minutes) after it was made:
+    /// [`AccountError::TotpSetupExpired`], and the recovery codes are made only on success.
     pub async fn totp_confirm(
         &self,
         client: &Client,
@@ -63,14 +68,21 @@ impl Accounts {
         self.authorise_manage(&mut tx, session, Manage::Confirm, code, proof)
             .await?;
         Self::refuse_during_deletion_shared(&mut tx, session.account_id).await?;
-        let pending: Option<(Vec<u8>, i64)> = sqlx::query_as(
-            "SELECT secret, last_step FROM account_totp
-             WHERE account_id = $1 AND NOT enabled FOR UPDATE",
+        let pending: Option<(Vec<u8>, i64, bool)> = sqlx::query_as(
+            "SELECT secret, last_step, created_at < now() - make_interval(secs => $2)
+             FROM account_totp WHERE account_id = $1 AND NOT enabled FOR UPDATE",
         )
         .bind(session.account_id)
+        .bind(f64::from(PENDING_SECRET_SECS))
         .fetch_optional(&mut *tx)
         .await?;
-        let (sealed, last_step) = pending.ok_or(AccountError::InvalidRequest)?;
+        let (sealed, last_step, expired) = pending.ok_or(AccountError::InvalidRequest)?;
+        // The attempt was counted by `authorise_manage`. An old secret is never compared with the
+        // code, so an expired setup can be neither guessed against nor confirmed; starting again
+        // makes a new secret.
+        if expired {
+            return Err(AccountError::TotpSetupExpired);
+        }
         let secret = self
             .secrets
             .open_totp(session.account_id, &sealed)

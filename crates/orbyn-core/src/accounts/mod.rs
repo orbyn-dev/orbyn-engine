@@ -101,6 +101,10 @@ pub enum AccountError {
     TotpAlreadyEnabled,
     #[error("no second factor is on for this account")]
     TotpNotEnabled,
+    /// The pending secret is more than ten minutes old: start again. Answered before the code is
+    /// looked at, so a code is never compared against an old secret.
+    #[error("the second-factor setup expired; start again")]
+    TotpSetupExpired,
     /// A wrong, expired or closed verification code look alike.
     #[error("the code is wrong or has expired; ask for a new one")]
     InvalidEmailCode,
