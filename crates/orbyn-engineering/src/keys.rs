@@ -19,12 +19,13 @@ pub const RESERVED: [&str; 4] = [
 /// Settings that never leave the device. Some hold paths, provider connections or secrets, or only
 /// make sense on one machine. The last four (`default_permission_mode`, `default_project_scripts`,
 /// `enable_agent_browser_access`, `enable_agent_device_access`) widen what agents may do or run
-/// commands, and the last seven (the default model, fallback and text-generation model, effort,
-/// thread environment, engine and model options) raise what a run costs or what it may reach. The
+/// commands, and the last nine (the default model, fallback and text-generation model, effort,
+/// thread environment, engine, model options, automatic thread titles and semantic branch naming)
+/// raise what a run costs or what it may reach: a peer could turn unasked model calls back on. The
 /// rule: a setting that raises cost or widens what an agent may do never syncs, and when it is
 /// unclear the stricter reading wins. A peer must not be able to loosen another machine, so each
 /// is chosen on that machine. The crate refuses all of them in both directions.
-pub const NOT_SYNCED: [&str; 26] = [
+pub const NOT_SYNCED: [&str; 28] = [
     "environment_icon",
     "keep_awake_during_runs",
     "background_activity_profile",
@@ -51,6 +52,8 @@ pub const NOT_SYNCED: [&str; 26] = [
     "default_thread_env_mode",
     "default_engine",
     "default_model_options",
+    "auto_thread_titles",
+    "branch_naming_mode",
 ];
 
 /// What a plain field holds.
@@ -125,11 +128,6 @@ pub const SPECS: &[Spec] = &[
         Initial::Text("paragraph")
     ),
     spec!(
-        "branch_naming_mode",
-        Kind::Enum(&["static", "semantic", "custom"]),
-        Initial::Text("static")
-    ),
-    spec!(
         "quit_confirmation",
         Kind::Enum(&["direct", "hold", "double_press"]),
         Initial::Text("direct")
@@ -139,7 +137,6 @@ pub const SPECS: &[Spec] = &[
         Kind::Enum(APPEARANCE),
         Initial::Text("system")
     ),
-    spec!("auto_thread_titles", Kind::Bool, Initial::Bool(true)),
     spec!("open_web_links_in_app", Kind::Bool, Initial::Bool(false)),
     spec!("preview_zoom", Kind::Number, Initial::Number(1.0)),
     spec!("model_order", Kind::Order, Initial::EmptyList),

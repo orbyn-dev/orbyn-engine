@@ -1,6 +1,6 @@
 {
  "version": 1,
- "about": "Shared inputs and expected results for the Engineering settings record (zone engineering.settings, record id person). The engine crate orbyn-engineering runs this file in tests/settings_vectors.rs; the app can run it against its own port. Devices are A (stamp device 1) and B (stamp device 2). An op at `t` milliseconds is stamped (t, 0, device). Errors are snake_case names of SettingsError. Ops: set [key, value|null], add/remove [list, id], bind rule, unbind {key, when}, fill [list, n] (adds member-000 to member-(n-1)), `as` stamps with another device number (a copy that was synced earlier), `error` expects that error and no change. A value {repeat:{text,count}} is the text repeated and {repeat_list:{text,count}} a list of it. `inject` puts raw fields (name to {value, stamp}) into a device as a newer app would have written them. `merge: [X, Y]` is X accepting Y's fields and then Y accepting X's; the two must end equal, and `expect` is read from X (and `rejected` from X's acceptance). `fill [list, n, len]` pads each id with x to len characters. `fill [list, n, len, prefix]` pads ids made of the prefix and a 3-digit number; `churn [list, n]` adds and removes n distinct ids (each removal 1 ms after its add); `after` ops run on the first device after the merge and its checks. Expectations: has_field / no_field (a field name is present, even as a removal, or absent), record_bytes_over.",
+ "about": "Shared inputs and expected results for the Engineering settings record (zone engineering.settings, record id person). The engine crate orbyn-engineering runs this file in tests/settings_vectors.rs; the app can run it against its own port. Devices are A (stamp device 1) and B (stamp device 2). An op at `t` milliseconds is stamped (t, 0, device). Errors are snake_case names of SettingsError. Ops: set [key, value|null], add/remove [list, id], bind rule, unbind {key, when}, fill [list, n] (adds member-000 to member-(n-1)), `as` stamps with another device number (a copy that was synced earlier), `error` expects that error and no change. A value {repeat:{text,count}} is the text repeated and {repeat_list:{text,count}} a list of it. `inject` puts raw fields (name to {value, stamp}) into a device as a newer app would have written them. `merge: [X, Y]` is X accepting Y's fields and then Y accepting X's; the two must end equal, and `expect` is read from X (and `rejected` from X's acceptance). `fill [list, n, len]` pads each id with x to len characters. `fill [list, n, len, prefix]` pads ids made of the prefix and a 3-digit number; `churn [list, n]` adds and removes n distinct ids (each removal 1 ms after its add); `after` ops run on the first device after the merge and its checks. Expectations: has_field / no_field (a field name is present, even as a removal, or absent), record_bytes_over. `stored` loads a device's record as an earlier version stored it, before its ops; fields that never sync are dropped on load. `inject` is what a peer sends on the wire, which a `Settings` never holds.",
  "now_ms": 1000000,
  "derivation": [
   {
@@ -212,6 +212,14 @@
   {
    "key": "default_model_options",
    "error": "not_synced"
+  },
+  {
+   "key": "auto_thread_titles",
+   "error": "not_synced"
+  },
+  {
+   "key": "branch_naming_mode",
+   "error": "not_synced"
   }
  ],
  "defaults": {
@@ -219,10 +227,8 @@
   "branch_name_prefix": "feat",
   "branch_name_instructions": "",
   "response_streaming_mode": "paragraph",
-  "branch_naming_mode": "static",
   "quit_confirmation": "direct",
   "preview_appearance": "system",
-  "auto_thread_titles": true,
   "open_web_links_in_app": false,
   "preview_zoom": 1,
   "model_order": []
@@ -237,11 +243,6 @@
   "response_streaming_mode": [
    "paragraph",
    "turn"
-  ],
-  "branch_naming_mode": [
-   "static",
-   "semantic",
-   "custom"
   ],
   "quit_confirmation": [
    "direct",
@@ -923,7 +924,7 @@
      {
       "t": 10,
       "set": [
-       "auto_thread_titles",
+       "open_web_links_in_app",
        "yes"
       ],
       "error": "invalid_value"
@@ -1778,7 +1779,7 @@
    }
   },
   {
-   "name": "the seven cost and reach settings are refused on write and dropped from remote input; the record is unchanged",
+   "name": "the nine cost and reach settings are refused on write and dropped from remote input; the record is unchanged",
    "devices": {
     "A": [
      {
@@ -1843,6 +1844,22 @@
        {
         "effort": "max"
        }
+      ],
+      "error": "not_synced"
+     },
+     {
+      "t": 12,
+      "set": [
+       "auto_thread_titles",
+       true
+      ],
+      "error": "not_synced"
+     },
+     {
+      "t": 12,
+      "set": [
+       "branch_naming_mode",
+       "semantic"
       ],
       "error": "not_synced"
      }
@@ -1916,6 +1933,22 @@
        "counter": 0,
        "device": 2
       }
+     },
+     "auto_thread_titles": {
+      "value": true,
+      "stamp": {
+       "millis": 30,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "branch_naming_mode": {
+      "value": "semantic",
+      "stamp": {
+       "millis": 30,
+       "counter": 0,
+       "device": 2
+      }
      }
     }
    },
@@ -1935,10 +1968,20 @@
      "default_effort",
      "default_thread_env_mode",
      "default_engine",
-     "default_model_options"
+     "default_model_options",
+     "auto_thread_titles",
+     "branch_naming_mode"
     ],
     "unknown": [],
     "rejected": [
+     {
+      "name": "auto_thread_titles",
+      "error": "not_synced"
+     },
+     {
+      "name": "branch_naming_mode",
+      "error": "not_synced"
+     },
      {
       "name": "default_effort",
       "error": "not_synced"
@@ -1968,6 +2011,610 @@
       "error": "not_synced"
      }
     ]
+   }
+  },
+  {
+   "name": "a record stored by an earlier version holds never-synced fields: loading drops them, so nothing uploaded carries one, and a write after it does not either",
+   "stored": {
+    "A": {
+     "environment_icon": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "keep_awake_during_runs": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "background_activity_profile": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "add_project_base_directory": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "provider_instances": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "custom_models": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "observability": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "storage_cleanup": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "worktree_cleanup": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "app_update_mode": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "automatic_git_fetch_minutes": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "provider_health_refresh_minutes": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "prefer_saved_login": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "disabled_engines": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_theme_set_at": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_permission_mode": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_project_scripts": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "enable_agent_browser_access": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "enable_agent_device_access": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_model": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "fallback_model": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "text_generation_model": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_effort": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_thread_env_mode": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_engine": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_model_options": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "auto_thread_titles": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "branch_naming_mode": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "_deleted": {
+      "value": true,
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "_x": {
+      "value": 1,
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_theme": {
+      "value": "light",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     }
+    }
+   },
+   "devices": {
+    "A": [
+     {
+      "t": 20,
+      "set": [
+       "default_theme",
+       "dark"
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "values": {
+     "default_theme": "dark"
+    },
+    "no_field": [
+     "environment_icon",
+     "keep_awake_during_runs",
+     "background_activity_profile",
+     "add_project_base_directory",
+     "provider_instances",
+     "custom_models",
+     "observability",
+     "storage_cleanup",
+     "worktree_cleanup",
+     "app_update_mode",
+     "automatic_git_fetch_minutes",
+     "provider_health_refresh_minutes",
+     "prefer_saved_login",
+     "disabled_engines",
+     "default_theme_set_at",
+     "default_permission_mode",
+     "default_project_scripts",
+     "enable_agent_browser_access",
+     "enable_agent_device_access",
+     "default_model",
+     "fallback_model",
+     "text_generation_model",
+     "default_effort",
+     "default_thread_env_mode",
+     "default_engine",
+     "default_model_options",
+     "auto_thread_titles",
+     "branch_naming_mode",
+     "_deleted",
+     "_x"
+    ],
+    "unknown": []
+   }
+  },
+  {
+   "name": "loading such a record and not writing at all also leaves nothing that never syncs in the fields to upload",
+   "stored": {
+    "A": {
+     "environment_icon": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "keep_awake_during_runs": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "background_activity_profile": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "add_project_base_directory": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "provider_instances": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "custom_models": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "observability": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "storage_cleanup": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "worktree_cleanup": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "app_update_mode": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "automatic_git_fetch_minutes": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "provider_health_refresh_minutes": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "prefer_saved_login": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "disabled_engines": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_theme_set_at": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_permission_mode": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_project_scripts": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "enable_agent_browser_access": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "enable_agent_device_access": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_model": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "fallback_model": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "text_generation_model": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_effort": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_thread_env_mode": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_engine": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_model_options": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "auto_thread_titles": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "branch_naming_mode": {
+      "value": "old-value",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "_deleted": {
+      "value": true,
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "_x": {
+      "value": 1,
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "default_theme": {
+      "value": "light",
+      "stamp": {
+       "millis": 5,
+       "counter": 0,
+       "device": 1
+      }
+     }
+    }
+   },
+   "devices": {
+    "A": [],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "values": {
+     "default_theme": "light"
+    },
+    "no_field": [
+     "environment_icon",
+     "keep_awake_during_runs",
+     "background_activity_profile",
+     "add_project_base_directory",
+     "provider_instances",
+     "custom_models",
+     "observability",
+     "storage_cleanup",
+     "worktree_cleanup",
+     "app_update_mode",
+     "automatic_git_fetch_minutes",
+     "provider_health_refresh_minutes",
+     "prefer_saved_login",
+     "disabled_engines",
+     "default_theme_set_at",
+     "default_permission_mode",
+     "default_project_scripts",
+     "enable_agent_browser_access",
+     "enable_agent_device_access",
+     "default_model",
+     "fallback_model",
+     "text_generation_model",
+     "default_effort",
+     "default_thread_env_mode",
+     "default_engine",
+     "default_model_options",
+     "auto_thread_titles",
+     "branch_naming_mode",
+     "_deleted",
+     "_x"
+    ],
+    "unknown": []
    }
   }
  ]

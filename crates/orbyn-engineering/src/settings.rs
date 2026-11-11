@@ -146,12 +146,25 @@ pub struct Accepted {
     pub rejected: Vec<Rejected>,
 }
 
+/// A name that never leaves the device: a setting on the [`NOT_SYNCED`] list, or a name that starts
+/// with `_` (orbyn-sync's own fields, such as `_deleted`).
+fn stays_local(name: &str) -> bool {
+    name.starts_with('_') || keys::NOT_SYNCED.contains(&name)
+}
+
 impl Settings {
-    pub fn from_fields(fields: Fields) -> Self {
+    /// Wraps the fields of a stored record. A record stored by an earlier version may hold a field
+    /// that never syncs (or an `_` name); such fields are **dropped here**, so they are never
+    /// uploaded again and nothing in this record reads them. The app keeps its own local copy of
+    /// those settings outside this record.
+    pub fn from_fields(mut fields: Fields) -> Self {
+        fields.0.retain(|name, _| !stays_local(name));
         Self { fields }
     }
 
-    /// The merged fields, to store and upload.
+    /// The merged fields, to store and upload. None of them is a setting that never syncs or a
+    /// name that starts with `_`: [`Settings::from_fields`] and [`Settings::accept_remote`] keep
+    /// them out, so whatever this returns is safe to send.
     pub fn fields(&self) -> &Fields {
         &self.fields
     }

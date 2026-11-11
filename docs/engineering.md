@@ -26,7 +26,7 @@ A zone name is chosen by the client (1 to 64 characters, no control characters; 
 
 ## The settings record
 
-One record (`person_settings`, id `person`) in `engineering.settings`. Its fields are a map of field name to value, each with its own hybrid logical clock stamp, and two copies merge **field by field** with `orbyn_sync::merge_remote`: the larger stamp wins each field, so two devices that changed different fields both keep their edits, every device ends with the same record in any order, and a stamp more than an hour ahead of the receiving clock is left out and named. The record is never deleted; a field goes back to its default with `null`. **13 keys sync** (11 plain fields, `model_order` among them, and the two sets) **plus the keybindings**; 26 more never do (below).
+One record (`person_settings`, id `person`) in `engineering.settings`. Its fields are a map of field name to value, each with its own hybrid logical clock stamp, and two copies merge **field by field** with `orbyn_sync::merge_remote`: the larger stamp wins each field, so two devices that changed different fields both keep their edits, every device ends with the same record in any order, and a stamp more than an hour ahead of the receiving clock is left out and named. The record is never deleted; a field goes back to its default with `null`. **11 keys sync** (9 plain fields, `model_order` among them, and the two sets) **plus the keybindings**; 28 more never do (below).
 
 ### Plain fields
 
@@ -38,10 +38,8 @@ Scalars, enums, numbers and `model_order` are **last writer wins per field**, an
 | `branch_name_prefix` | text | any | `feat` |
 | `branch_name_instructions` | text | any | `""` |
 | `response_streaming_mode` | enum | `paragraph`, `turn` | `paragraph` |
-| `branch_naming_mode` | enum | `static`, `semantic`, `custom` | `static` |
 | `quit_confirmation` | enum | `direct`, `hold`, `double_press` | `direct` |
 | `preview_appearance` | enum | `system`, `light`, `dark` | `system` |
-| `auto_thread_titles` | bool | | `true` |
 | `open_web_links_in_app` | bool | | `false` |
 | `preview_zoom` | number | finite, above 0, up to 10 | `1` |
 | `model_order` | list | model ids as text, replaced whole by the last writer; at most 500 | `[]` |
@@ -77,17 +75,17 @@ Typed errors (`SettingsError`, which never carries the value): `InvalidKey`, `No
 
 ### Never synced: `NotSynced`
 
-**26 keys never sync.** The rule: **a setting that raises cost or widens what an agent may do never syncs, and when it is unclear the stricter reading wins.** One machine, or a buggy or hostile peer, must not be able to loosen or make dearer another machine, so each of these is chosen on that machine.
+**28 keys never sync.** The rule: **a setting that raises cost or widens what an agent may do never syncs, and when it is unclear the stricter reading wins.** One machine, or a buggy or hostile peer, must not be able to loosen or make dearer another machine, so each of these is chosen on that machine.
 
 - **Fifteen hold paths, provider connections or secrets, or only mean something on one machine:** `environment_icon`, `keep_awake_during_runs`, `background_activity_profile`, `add_project_base_directory`, `provider_instances`, `custom_models`, `observability`, `storage_cleanup`, `worktree_cleanup`, `app_update_mode`, `automatic_git_fetch_minutes`, `provider_health_refresh_minutes`, `prefer_saved_login`, `disabled_engines`, `default_theme_set_at`.
 - **Four widen what agents may do (cross-device escalation):** `default_permission_mode` (a `full_access` value must not loosen other machines), `default_project_scripts`, `enable_agent_browser_access`, `enable_agent_device_access`.
-- **Seven raise what a run costs or what it may reach:** `default_model`, `fallback_model`, `text_generation_model`, `default_effort`, `default_thread_env_mode`, `default_engine`, `default_model_options`. `default_engine` may sync later, once the app has a per-machine approval for it; until then it does not.
+- **Nine raise what a run costs or what it may reach:** `default_model`, `fallback_model`, `text_generation_model`, `default_effort`, `default_thread_env_mode`, `default_engine`, `default_model_options`, `auto_thread_titles` (a peer could turn unasked model calls back on) and `branch_naming_mode` (semantic naming adds a model call per branch). `default_engine` may sync later, once the app has a per-machine approval for it; until then it does not.
 
-The crate refuses all 26 **in both directions**: a write is `NotSynced`, and a field with such a name from another device is dropped and named, so nothing secret or loosening enters by mistake or by a buggy peer. What does sync is a short list the person chose to follow them: the theme, the branch-name settings, how a reply streams, quit confirmation, the preview, thread titles, web links, zoom, the model favourites, the hidden models and their order, and the keybindings.
+The crate refuses all 28 **in both directions**: a write is `NotSynced`, and a field with such a name from another device is dropped and named, so nothing secret or loosening enters by mistake or by a buggy peer. What does sync is a short list that follows the person: the theme, the branch-name prefix and instructions, how a reply streams, quit confirmation, the preview appearance, web links, zoom, the model favourites, the hidden models and their order, and the keybindings.
 
 ### Versions and unknown fields
 
-There is no record version. Fields are independent and additive: a newer app adds a key, or an enum value, and an older one **keeps it and passes it on**. That is storage, not permission: **the app must apply only the keys on its own allowlist** and never act on a key it does not know, so a key a newer version added (or a peer invented) is carried but not obeyed. `Settings` wraps the merged fields exactly as stored, so editing a known field never rewrites an unknown one, and `unknown()` lists them. A field's meaning never changes; a change of meaning is a new key.
+There is no record version. Fields are independent and additive: a newer app adds a key, or an enum value, and an older one **keeps it and passes it on**. That is storage, not permission: **the app must apply only the keys on its own allowlist** and never act on a key it does not know, so a key a newer version added (or a peer invented) is carried but not obeyed. `Settings` wraps the merged fields as stored, so editing a known field never rewrites an unknown one, and `unknown()` lists them. The exception is a field that never syncs, or whose name starts with `_`: a record stored by an earlier version may hold one, and `Settings::from_fields` **drops it on load**, so `fields()` (what the app stores and uploads) never carries one and the value never leaves the device through this record. The app keeps its own local copy of such settings outside this record. A field's meaning never changes; a change of meaning is a new key.
 
 ## Using it
 
