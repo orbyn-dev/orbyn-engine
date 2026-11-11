@@ -83,9 +83,25 @@ fn apply(settings: &mut Settings, op: &Value, device: u64) {
             pair[1].as_u64().expect("n"),
         );
         let width = pair.get(2).and_then(Value::as_u64).unwrap_or(0) as usize;
+        let prefix = pair.get(3).and_then(Value::as_str).unwrap_or("member-");
         (0..count).try_for_each(|i| {
-            let id = format!("member-{i:03}");
+            let id = format!("{prefix}{i:03}");
             settings.add(name, &format!("{id:x<width$}"), at)
+        })
+    } else if let Some(pair) = op.get("churn") {
+        // Adds and removes `n` distinct ids: each add at `t`, its removal a millisecond later.
+        let (name, count) = (
+            pair[0].as_str().expect("list"),
+            pair[1].as_u64().expect("n"),
+        );
+        let later = Stamp {
+            millis: at.millis + 1,
+            ..at
+        };
+        (0..count).try_for_each(|i| {
+            let id = format!("churn-{i:04}");
+            settings.add(name, &id, at)?;
+            settings.remove(name, &id, later)
         })
     } else {
         panic!("an op this runner does not know: {op}");
@@ -206,6 +222,24 @@ fn check_expect(name: &str, settings: &Settings, expect: &Value) {
             "{name}: {list}"
         );
     }
+    for field in expect["has_field"].as_array().into_iter().flatten() {
+        let field = field.as_str().expect("name");
+        assert!(
+            settings.fields().0.contains_key(field),
+            "{name}: has {field}"
+        );
+    }
+    for field in expect["no_field"].as_array().into_iter().flatten() {
+        let field = field.as_str().expect("name");
+        assert!(
+            !settings.fields().0.contains_key(field),
+            "{name}: no {field}"
+        );
+    }
+    if let Some(over) = expect["record_bytes_over"].as_u64() {
+        let bytes = serde_json::to_vec(settings.fields()).expect("json").len() as u64;
+        assert!(bytes > over, "{name}: the record is {bytes} bytes");
+    }
     if let Some(want) = expect.get("keybindings") {
         let want: Vec<Rule> = serde_json::from_value(want.clone()).expect("rules");
         assert_eq!(settings.keybindings(), want, "{name}: keybindings");
@@ -268,8 +302,22 @@ fn scenarios() {
             if accepted.rejected.is_empty() {
                 check_expect(name, &devices[y].1, &case["expect"]);
             }
+            // Local writes after the merge, on the first device: the record cap holds for them.
+            for op in case["after"].as_array().into_iter().flatten() {
+                apply(&mut devices[x].1, op, x as u64 + 1);
+            }
         } else {
             check_expect(name, &devices[0].1, &case["expect"]);
         }
     }
+}
+
+#[test]
+fn orbyn_syncs_own_field_names_can_never_be_settings() {
+    // `_deleted` makes `Fields::is_deleted` read the record as deleted; it must stay refused even
+    // if orbyn-sync renames it.
+    assert_eq!(
+        check_name(orbyn_sync::DELETED).map(|_| ()),
+        Err(SettingsError::InvalidKey)
+    );
 }

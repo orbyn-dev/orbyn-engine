@@ -30,7 +30,7 @@ One record (`person_settings`, id `person`) in `engineering.settings`. Its field
 
 ### Plain fields
 
-Scalars, enums, numbers, objects and `model_order` are **last writer wins per field**, and `null` means "the default". Keys: at most 64 characters, `a-z 0-9 _ . :` only. A value this version cannot read (a wrong type, an enum value a newer app added) reads as the default and **stays in the record untouched**.
+Scalars, enums, numbers, objects and `model_order` are **last writer wins per field**, and `null` means "the default". Keys: at most 64 characters, `a-z 0-9 _ . :` only, and **never starting with `_`**: orbyn-sync's own fields start with it (`_deleted` makes a record read as deleted), so such a name is refused in both directions. A value this version cannot read (a wrong type, an enum value a newer app added) reads as the default and **stays in the record untouched**.
 
 | Key | Kind | Values | Default |
 | --- | --- | --- | --- |
@@ -46,8 +46,8 @@ Scalars, enums, numbers, objects and `model_order` are **last writer wins per fi
 | `preview_appearance` | enum | `system`, `light`, `dark` | `system` |
 | `auto_thread_titles` | bool | | `true` |
 | `open_web_links_in_app` | bool | | `false` |
-| `preview_zoom` | number | finite, above 0 (the app narrows the range) | `1` |
-| `default_model_options` | object | option id to one value (text, number or boolean); at most 500 entries | `{}` |
+| `preview_zoom` | number | finite, above 0, up to 10 | `1` |
+| `default_model_options` | object | option id to one value (text, number or boolean); at most 500 entries. **Free-form: it must never hold a provider token, key or any secret** (the app's responsibility; the crate cannot tell) | `{}` |
 | `model_order` | list | model ids as text, replaced whole by the last writer; at most 500 | `[]` |
 
 ### Sets: `favorite_models` and `hidden_models`
@@ -56,22 +56,28 @@ One field per element, so an add on one machine and a removal on another merge i
 
 > `<list>.<first 16 characters of the lower-case, unpadded base32 (RFC 4648) of SHA-256(id)>`
 
-The value is the id itself (1 to 512 characters). **A removal is `null`** with its own stamp (a tombstone), so a removal on machine A is not undone by an older copy on machine B, and an add stamped after a removal brings the element back. Example: `openrouter/anthropic/claude-sonnet-4-5` in `favorite_models` is the field `favorite_models.zfkx7fd4ugwrihff`. A field whose value does not hash to its own name is not read, and is refused when it arrives from another device.
+The value is the id itself (1 to 512 characters). **Ids are compared by their raw bytes**: the NFC and NFD spellings of a name are two different members (no normalisation, so every port derives the same field). **A removal is `null`** with its own stamp (a tombstone), so a removal on machine A is not undone by an older copy on machine B, and an add stamped after a removal brings the element back. Example: `openrouter/anthropic/claude-sonnet-4-5` in `favorite_models` is the field `favorite_models.zfkx7fd4ugwrihff`. A field whose value does not hash to its own name is not read, and is refused when it arrives from another device.
 
 ### Keybindings
 
 One field per rule: `keybinding.<same derivation of SHA-256(key + NUL + when)>`, where `when` is the empty text when the rule has none (a `when` may not be empty, so the two never collide). `cmd+shift+K` with no `when` is `keybinding.z4rjbdh3flaouhs7` and with `when` `inputFocus` it is `keybinding.sraksp7653s72pjx`. The value is the rule `{key, command, when?, remove?}`; `remove: true` is the app's "take the default binding away", and is a rule like any other. **Removing a rule from the record is `null`**, as for sets. Same limits: key 1 to 128, command 1 to 256, `when` 1 to 512 characters.
 
-### Limits and errors
+### Limits, capacity and errors
 
 | Limit | Value |
 | --- | --- |
-| Field name | 64 characters, `a-z 0-9 _ . :` |
+| Field name | 64 characters, `a-z 0-9 _ . :`, not starting with `_` |
 | One value | 8 KiB of JSON |
 | The record | 64 KiB, as the JSON of its fields with their stamps (the engine accepts 256 KiB per record) |
 | A list | 500 entries: set members, keybinding rules, `model_order`, `default_model_options` |
 
-Typed errors (`SettingsError`, which never carries the value): `InvalidKey`, `NotSynced`, `TooLarge`, `UnknownKey` (a write to a key this version does not have), `InvalidValue`, `TooFarAhead` (a remote stamp more than an hour ahead). Writes check before they change anything. A record that would pass 64 KiB after a merge is not merged, and the changed fields are named as `TooLarge`.
+**Real capacity.** The record cap is what a person reaches first. One set element costs about the id's length plus 93 bytes, and about 120 with real stamps (a 13-digit time and a device number of up to 20 digits), so about **360 favourites of 60 characters** fit. The 500-entry list cap is an upper bound that the record cap reaches first for any id longer than about 12 characters.
+
+**Where the cap is enforced: local writes only.** A merge from another device is **always applied** (`accept_remote`), whatever the size, so devices converge: two devices that each added 250 favourites both end with all 500. A local write is refused with `TooLarge` (the message names the 8 KiB, 64 KiB and 500 limits) when it would take the record past 64 KiB **and** make it bigger. A write that does not grow the record (a removal, a reset) is always allowed, so a record that merged past the cap can always be brought back under it.
+
+**Compaction.** A removal leaves a `null` field, which is what stops an older copy bringing the element back. Every local write drops the removals stamped **more than 90 days before the write's own stamp**, so adding and removing many distinct ids does not fill the record for good. **A device that stays offline longer than that, holding an addition that was removed elsewhere, can bring that addition back when it reconnects.** Removals younger than 90 days (exactly 90 days is still kept) are always kept.
+
+Typed errors (`SettingsError`, which never carries the value): `InvalidKey`, `NotSynced`, `TooLarge`, `UnknownKey` (a write to a key this version does not have), `InvalidValue`, `TooFarAhead` (a remote stamp more than an hour ahead). Writes check before they change anything.
 
 ### Never synced: `NotSynced`
 
@@ -96,4 +102,4 @@ The device stages those fields as the record `person` of type `person_settings` 
 
 ## Test vectors
 
-`settings.json` holds derivations (the exact field names above), key checks, defaults, and scenarios: add on A and remove on B (both orders), concurrent adds, keybindings with and without `when`, a key and an enum value from a newer app, over-limit values, record and list caps, and refused incoming fields. The file says how each op and expectation is read, so an app can run it against its own port.
+`settings.json` holds derivations (the exact field names above), key checks, defaults, and scenarios: add on A and remove on B (both orders), concurrent adds, keybindings with and without `when`, a key and an enum value from a newer app, over-limit values, the record cap on local writes and its absence on remote merges, 250 + 250 favourites converging, churn and compaction (a removal at 90 days and younger), `_deleted` from a peer, NFC against NFD, and refused incoming fields. The file says how each op and expectation is read, so an app can run it against its own port.

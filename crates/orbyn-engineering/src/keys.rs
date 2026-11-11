@@ -46,7 +46,7 @@ pub enum Kind {
     /// One of these, or a theme id: 1 to 64 of `a-z 0-9 _ . : -`.
     EnumOrThemeId(&'static [&'static str]),
     Bool,
-    /// A finite number above zero.
+    /// A finite number above 0, up to 10.
     Number,
     /// An object of option id to one value (text, number or boolean).
     Options,

@@ -1,6 +1,6 @@
 {
  "version": 1,
- "about": "Shared inputs and expected results for the Engineering settings record (zone engineering.settings, record id person). The engine crate orbyn-engineering runs this file in tests/settings_vectors.rs; the app can run it against its own port. Devices are A (stamp device 1) and B (stamp device 2). An op at `t` milliseconds is stamped (t, 0, device). Errors are snake_case names of SettingsError. Ops: set [key, value|null], add/remove [list, id], bind rule, unbind {key, when}, fill [list, n] (adds member-000 to member-(n-1)), `as` stamps with another device number (a copy that was synced earlier), `error` expects that error and no change. A value {repeat:{text,count}} is the text repeated and {repeat_list:{text,count}} a list of it. `inject` puts raw fields (name to {value, stamp}) into a device as a newer app would have written them. `merge: [X, Y]` is X accepting Y's fields and then Y accepting X's; the two must end equal, and `expect` is read from X (and `rejected` from X's acceptance). `fill [list, n, len]` pads each id with x to len characters.",
+ "about": "Shared inputs and expected results for the Engineering settings record (zone engineering.settings, record id person). The engine crate orbyn-engineering runs this file in tests/settings_vectors.rs; the app can run it against its own port. Devices are A (stamp device 1) and B (stamp device 2). An op at `t` milliseconds is stamped (t, 0, device). Errors are snake_case names of SettingsError. Ops: set [key, value|null], add/remove [list, id], bind rule, unbind {key, when}, fill [list, n] (adds member-000 to member-(n-1)), `as` stamps with another device number (a copy that was synced earlier), `error` expects that error and no change. A value {repeat:{text,count}} is the text repeated and {repeat_list:{text,count}} a list of it. `inject` puts raw fields (name to {value, stamp}) into a device as a newer app would have written them. `merge: [X, Y]` is X accepting Y's fields and then Y accepting X's; the two must end equal, and `expect` is read from X (and `rejected` from X's acceptance). `fill [list, n, len]` pads each id with x to len characters. `fill [list, n, len, prefix]` pads ids made of the prefix and a 3-digit number; `churn [list, n]` adds and removes n distinct ids (each removal 1 ms after its add); `after` ops run on the first device after the merge and its checks. Expectations: has_field / no_field (a field name is present, even as a removal, or absent), record_bytes_over.",
  "now_ms": 1000000,
  "derivation": [
   {
@@ -156,6 +156,18 @@
   {
    "key": "default_theme_set_at",
    "error": "not_synced"
+  },
+  {
+   "key": "_deleted",
+   "error": "invalid_key"
+  },
+  {
+   "key": "_x",
+   "error": "invalid_key"
+  },
+  {
+   "key": "x_",
+   "ok": "plain_unknown"
   }
  ],
  "defaults": {
@@ -862,6 +874,38 @@
      {
       "t": 10,
       "set": [
+       "preview_zoom",
+       10.5
+      ],
+      "error": "invalid_value"
+     },
+     {
+      "t": 9,
+      "set": [
+       "preview_zoom",
+       10
+      ]
+     },
+     {
+      "t": 9,
+      "set": [
+       "default_model_options",
+       {
+        "effort": "high"
+       }
+      ]
+     },
+     {
+      "t": 10,
+      "set": [
+       "_deleted",
+       true
+      ],
+      "error": "invalid_key"
+     },
+     {
+      "t": 10,
+      "set": [
        "auto_thread_titles",
        "yes"
       ],
@@ -1270,6 +1314,320 @@
      "favorite_models": [
       105,
       110
+     ]
+    }
+   }
+  },
+  {
+   "name": "a peer cannot mark the record deleted: names starting with _ are refused in both directions",
+   "inject": {
+    "B": {
+     "_deleted": {
+      "value": true,
+      "stamp": {
+       "millis": 50,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "_other": {
+      "value": 1,
+      "stamp": {
+       "millis": 50,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "default_theme": {
+      "value": "dark",
+      "stamp": {
+       "millis": 51,
+       "counter": 0,
+       "device": 2
+      }
+     }
+    }
+   },
+   "devices": {
+    "A": [],
+    "B": []
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "values": {
+     "default_theme": "dark"
+    },
+    "no_field": [
+     "_deleted",
+     "_other"
+    ],
+    "unknown": [],
+    "rejected": [
+     {
+      "name": "_deleted",
+      "error": "invalid_key"
+     },
+     {
+      "name": "_other",
+      "error": "invalid_key"
+     }
+    ]
+   }
+  },
+  {
+   "name": "two devices that each filled the record converge, and a local write after it is refused",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "fill": [
+       "favorite_models",
+       250,
+       60,
+       "a-"
+      ]
+     }
+    ],
+    "B": [
+     {
+      "t": 10,
+      "fill": [
+       "favorite_models",
+       250,
+       60,
+       "b-"
+      ]
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "after": [
+    {
+     "t": 20,
+     "set": [
+      "default_theme",
+      "dark"
+     ],
+     "error": "too_large"
+    },
+    {
+     "t": 20,
+     "remove": [
+      "favorite_models",
+      "a-000xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     ]
+    }
+   ],
+   "expect": {
+    "members_count": {
+     "favorite_models": 500
+    },
+    "record_bytes_over": 65536
+   }
+  },
+  {
+   "name": "the record cap counts the real capacity: about 360 favourites of 60 characters, below the 500-entry list cap",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "fill": [
+       "favorite_models",
+       500,
+       60,
+       "m-"
+      ],
+      "error": "too_large"
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "members_between": {
+     "favorite_models": [
+      380,
+      430
+     ]
+    }
+   }
+  },
+  {
+   "name": "churn of distinct ids leaves nulls; a young write is refused and an old-enough one compacts them",
+   "devices": {
+    "A": [
+     {
+      "t": 1000,
+      "churn": [
+       "favorite_models",
+       650
+      ]
+     },
+     {
+      "t": 1500,
+      "set": [
+       "branch_name_instructions",
+       {
+        "repeat": {
+         "text": "a",
+         "count": 8000
+        }
+       }
+      ],
+      "error": "too_large"
+     },
+     {
+      "t": 7776005000,
+      "set": [
+       "branch_name_instructions",
+       {
+        "repeat": {
+         "text": "a",
+         "count": 8000
+        }
+       }
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "values": {
+     "branch_name_instructions": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "members": {
+     "favorite_models": []
+    },
+    "no_field": [
+     "favorite_models.pqwrgfoui375sfrj",
+     "favorite_models.sfl5no7gokdpa2s6"
+    ]
+   }
+  },
+  {
+   "name": "a removal older than 90 days is dropped by a local write and a younger one is kept",
+   "devices": {
+    "A": [
+     {
+      "t": 1000,
+      "add": [
+       "favorite_models",
+       "old/model"
+      ]
+     },
+     {
+      "t": 1001,
+      "remove": [
+       "favorite_models",
+       "old/model"
+      ]
+     },
+     {
+      "t": 7775999000,
+      "add": [
+       "favorite_models",
+       "young/model"
+      ]
+     },
+     {
+      "t": 7776001000,
+      "remove": [
+       "favorite_models",
+       "young/model"
+      ]
+     },
+     {
+      "t": 7776001002,
+      "set": [
+       "default_theme",
+       "dark"
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "values": {
+     "default_theme": "dark"
+    },
+    "no_field": [
+     "favorite_models.ij2qhgqwdrcx6x5b"
+    ],
+    "has_field": [
+     "favorite_models.vkbpj6d6br4e5ovs"
+    ]
+   }
+  },
+  {
+   "name": "a removal exactly 90 days old is kept",
+   "devices": {
+    "A": [
+     {
+      "t": 1000,
+      "add": [
+       "hidden_models",
+       "edge/model"
+      ]
+     },
+     {
+      "t": 1001,
+      "remove": [
+       "hidden_models",
+       "edge/model"
+      ]
+     },
+     {
+      "t": 7776001001,
+      "set": [
+       "default_theme",
+       "dark"
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "has_field": [
+     "hidden_models.i5xqti7lcfqmk4ym"
+    ]
+   }
+  },
+  {
+   "name": "ids are compared by raw bytes: NFC and NFD forms of the same name are two members",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "add": [
+       "favorite_models",
+       "café/model"
+      ]
+     },
+     {
+      "t": 11,
+      "add": [
+       "favorite_models",
+       "café/model"
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "members": {
+     "favorite_models": [
+      "café/model",
+      "café/model"
      ]
     }
    }

@@ -10,8 +10,13 @@ use serde_json::Value;
 pub const MAX_KEY: usize = 64;
 /// The most a field's value may take, as JSON.
 pub const MAX_VALUE_BYTES: usize = 8 * 1024;
-/// The most the whole record may take, as the JSON of its fields with their stamps.
+/// The most the whole record may take, as the JSON of its fields with their stamps. It is enforced
+/// on **local writes only**: a merge from another device is always applied, so devices converge
+/// even when two of them each filled the record.
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
+/// A removal (a `null` field) older than this, measured against the stamp of a local write, is
+/// dropped by that write: 90 days.
+pub const COMPACT_AFTER_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 /// The most entries of a list: members of a set, keybinding rules, `model_order` and the entries
 /// of `default_model_options`.
 pub const MAX_ENTRIES: usize = 500;
@@ -21,14 +26,18 @@ pub use crate::keys::NOT_SYNCED;
 /// Why a name or value was refused. Never carries any of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SettingsError {
-    /// The name is not 1 to 64 of `a-z 0-9 _ . :`, or it is reserved.
+    /// The name is not 1 to 64 of `a-z 0-9 _ . :`, starts with `_` (orbyn-sync's own fields, such
+    /// as `_deleted`, do), or is reserved.
     #[error("the key is not valid")]
     InvalidKey,
     /// The setting stays on the device it was made on.
     #[error("this setting is never synced")]
     NotSynced,
-    /// A value over 8 KiB, a record over 64 KiB, or a list over 500 entries.
-    #[error("the value, the record or the list is too large")]
+    /// A value over 8 KiB, a write that would take the record over 64 KiB, or a list over 500
+    /// entries.
+    #[error(
+        "too large: a value is limited to 8 KiB, the record to 64 KiB and a list to 500 entries"
+    )]
     TooLarge,
     /// The key is not one this version has, so it cannot be written.
     #[error("this version has no such setting")]
@@ -41,10 +50,12 @@ pub enum SettingsError {
     TooFarAhead,
 }
 
-/// A name that is allowed as a field name at all: 1 to 64 of `a-z 0-9 _ . :`, and not on the
-/// [`NOT_SYNCED`] list.
+/// A name that is allowed as a field name at all: 1 to 64 of `a-z 0-9 _ . :`, not starting with `_`
+/// (so a peer cannot write orbyn-sync's `_deleted` and make the record read as deleted), and not
+/// on the [`NOT_SYNCED`] list.
 pub fn check_name(name: &str) -> Result<Class, SettingsError> {
     let chars_ok = !name.is_empty()
+        && !name.starts_with('_')
         && name.len() <= MAX_KEY
         && name.bytes().all(|b| {
             b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b':')
@@ -115,7 +126,9 @@ fn valid_plain(spec: &Spec, value: &Value) -> bool {
             .as_str()
             .is_some_and(|v| options.contains(&v) || keys::is_theme_id(v)),
         Kind::Bool => value.is_boolean(),
-        Kind::Number => value.as_f64().is_some_and(|n| n.is_finite() && n > 0.0),
+        Kind::Number => value
+            .as_f64()
+            .is_some_and(|n| n.is_finite() && n > 0.0 && n <= 10.0),
         Kind::Options => value.as_object().is_some_and(|map| {
             map.len() <= MAX_ENTRIES
                 && map
@@ -192,8 +205,17 @@ impl Settings {
             .collect()
     }
 
-    fn commit(&mut self, next: Fields) -> Result<(), SettingsError> {
-        if record_len(&next) > MAX_RECORD_BYTES {
+    /// Stores the result of a local write made at `stamp`: first drops the removals older than
+    /// [`COMPACT_AFTER_MS`] before it, then refuses it if the record would pass the cap **and**
+    /// grow. A write that does not grow the record (a removal, a reset) is always allowed, so a
+    /// record that merged past the cap can always be brought back under it.
+    fn commit(&mut self, mut next: Fields, stamp: Stamp) -> Result<(), SettingsError> {
+        next.0.retain(|_, field| {
+            !(field.value.is_null()
+                && field.stamp.millis.saturating_add(COMPACT_AFTER_MS) < stamp.millis)
+        });
+        let size = record_len(&next);
+        if size > MAX_RECORD_BYTES && size > record_len(&self.fields) {
             return Err(SettingsError::TooLarge);
         }
         self.fields = next;
@@ -221,7 +243,7 @@ impl Settings {
         }
         let mut next = self.fields.clone();
         next.set(key, value, stamp);
-        self.commit(next)
+        self.commit(next, stamp)
     }
 
     /// The members of a set, sorted.
@@ -260,7 +282,7 @@ impl Settings {
             Value::String(id.to_owned()),
             stamp,
         );
-        self.commit(next)
+        self.commit(next, stamp)
     }
 
     /// Removes `id` from a set: its field becomes `null` with its own stamp, so a later add on
@@ -269,7 +291,7 @@ impl Settings {
         self.members(list)?;
         let mut next = self.fields.clone();
         next.set(&keys::element_field(list, id), Value::Null, stamp);
-        self.commit(next)
+        self.commit(next, stamp)
     }
 
     /// The keybinding rules, sorted by key, then `when`.
@@ -302,7 +324,7 @@ impl Settings {
         }
         let mut next = self.fields.clone();
         next.set(&name, value, stamp);
-        self.commit(next)
+        self.commit(next, stamp)
     }
 
     /// Removes the rule for `key` and `when` from the record: its field becomes `null`.
@@ -314,7 +336,7 @@ impl Settings {
     ) -> Result<(), SettingsError> {
         let mut next = self.fields.clone();
         next.set(&keys::keybinding_field(key, when), Value::Null, stamp);
-        self.commit(next)
+        self.commit(next, stamp)
     }
 
     /// What is wrong with one incoming field, if anything that makes it unfit to keep.
@@ -343,8 +365,8 @@ impl Settings {
     /// Merges fields that came from another device or the server. A field that may not be here
     /// (a setting that never syncs, a bad name, a value over the limit, an element or rule that
     /// does not match its name, a stamp too far ahead) is left out and named. Values a newer
-    /// version added are kept as they are. If the merged record would pass the record limit,
-    /// nothing is merged and every changed field is named as too large.
+    /// version added are kept as they are. A remote merge is **always applied**, whatever the
+    /// record's size, so devices converge; only a local write is held to the record limit.
     pub fn accept_remote(&mut self, theirs: &Fields, now_millis: u64) -> Accepted {
         let mut accepted = Fields::default();
         let mut rejected = Vec::new();
@@ -366,18 +388,7 @@ impl Settings {
                 error: SettingsError::TooFarAhead,
             });
         }
-        if record_len(&merged.fields) > MAX_RECORD_BYTES {
-            for (name, field) in &accepted.0 {
-                if self.fields.0.get(name) != Some(field) {
-                    rejected.push(Rejected {
-                        name: name.clone(),
-                        error: SettingsError::TooLarge,
-                    });
-                }
-            }
-        } else {
-            self.fields = merged.fields;
-        }
+        self.fields = merged.fields;
         rejected.sort_by(|a, b| a.name.cmp(&b.name));
         Accepted { rejected }
     }
