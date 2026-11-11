@@ -554,6 +554,7 @@ impl Run {
             approver: &self.a,
             device_id: self.b_id.as_bytes(),
             device: &self.b,
+            descriptor: None,
         })
     }
 
@@ -10084,4 +10085,217 @@ async fn the_label_survives_the_second_factor_step() {
     let labels: Vec<_> = devices.iter().map(|d| d["app"].clone()).collect();
     assert!(labels.contains(&json!("engineering")), "{labels:?}");
     assert_eq!(devices.len(), 2);
+}
+
+// ---- Approving a device that named its app: the description is in the digits and the v3 message -
+
+/// How a test builds an older approval message for a run.
+type Older<'a> = Box<dyn Fn(&Run) -> Vec<u8> + 'a>;
+
+const DESCRIBED: (&str, &str, &str) = ("Phone", "macos", "engineering");
+
+/// A signed up (no label) and B signed in pending under `DESCRIBED`.
+async fn described_pair(server: &Server) -> Pair {
+    let email = email();
+    let a = DeviceKeys::generate().expect("keys");
+    let a_session = server.register(&email, b"pw", &a).await;
+    let b = DeviceKeys::generate().expect("keys");
+    let (status, b_session) = server
+        .login_labelled(&email, b"pw", &b, &labelled(DESCRIBED.0, DESCRIBED.2))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{b_session}");
+    Pair {
+        email,
+        account_id: uuid_of(&a_session["account_id"]),
+        a,
+        a_session,
+        b,
+        b_session,
+    }
+}
+
+/// The pairing of `run`, with the description of B unless `plain`.
+fn pairing_of<'a>(run: &'a Run, plain: bool) -> auth::Pairing<'a> {
+    auth::Pairing {
+        account_id: run.account.as_bytes(),
+        approval_id: run.id.as_bytes(),
+        created_at: run.created_at,
+        approver_id: run.a_id.as_bytes(),
+        approver: &run.a,
+        device_id: run.b_id.as_bytes(),
+        device: &run.b,
+        descriptor: (!plain).then(|| descriptor(DESCRIBED)),
+    }
+}
+
+impl Server {
+    /// Opens an approval of the described B whose commitment covers the description, or not.
+    async fn start_described(&self, p: &Pair, plain: bool) -> (Run, StatusCode, Value) {
+        let run = Run {
+            id: Uuid::new_v4(),
+            created_at: chrono_now(),
+            nonce: rand32(),
+            account: p.account_id,
+            a_id: uuid_of(&p.a_session["device_id"]),
+            a: p.a.public(),
+            b_id: uuid_of(&p.b_session["device_id"]),
+            b: p.b.public(),
+        };
+        let commitment = auth::approval_commitment(&pairing_of(&run, plain), &run.nonce);
+        let (status, body) = self
+            .call(
+                Method::POST,
+                "/v1/devices/approvals",
+                Some(token(&p.a_session)),
+                Some(json!({
+                    "approval_id": run.id.to_string(),
+                    "device_id": run.b_id.to_string(),
+                    "created_at": run.created_at,
+                    "commitment": b64(&commitment),
+                })),
+            )
+            .await;
+        (run, status, body)
+    }
+
+    async fn nonce_and_reveal(&self, p: &Pair, run: &Run) -> ([u8; 32], StatusCode, Value) {
+        let device_nonce = rand32();
+        let (status, body) = self
+            .step(
+                token(&p.b_session),
+                run,
+                "nonce",
+                json!({"nonce": b64(&device_nonce)}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let (status, body) = self
+            .step(
+                token(&p.a_session),
+                run,
+                "reveal",
+                json!({"nonce": b64(&run.nonce)}),
+            )
+            .await;
+        (device_nonce, status, body)
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_commitment_for_a_described_device_must_cover_its_description() {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let p = described_pair(&server).await;
+    // An approver that was not shown the description commits over the plain pairing: the server
+    // rebuilds the commitment with the device's stored description and refuses the reveal.
+    let (run, status, body) = server.start_described(&p, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (_, status, body) = server.nonce_and_reveal(&p, &run).await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::BAD_REQUEST, &json!("invalid_commitment"))
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_described_device_is_approved_only_under_the_v3_message() {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let p = described_pair(&server).await;
+    let endorsement = b"an endorsement".to_vec();
+    let hash = auth::endorsement_hash(&endorsement);
+    let confirm = |context: &str, message: Vec<u8>| {
+        json!({
+            "signature": b64(&p.a.sign(context, &message)),
+            "endorsement": b64(&endorsement),
+        })
+    };
+
+    // The v2 message (no description) and the v1 message are refused, and each closes its approval.
+    let wrong: [(&str, Older<'_>); 2] = [
+        (
+            auth::DEVICE_APPROVAL_V2_CONTEXT,
+            Box::new(|run| auth::approval_message_v2(&pairing_of(run, true), &hash)),
+        ),
+        (
+            auth::DEVICE_APPROVAL_CONTEXT,
+            Box::new(|run| auth::approval_message(&pairing_of(run, true))),
+        ),
+    ];
+    for (context, message) in wrong {
+        let (run, status, body) = server.start_described(&p, false).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let (_, status, body) = server.nonce_and_reveal(&p, &run).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let (status, body) = server
+            .step(
+                token(&p.a_session),
+                &run,
+                "confirm",
+                confirm(context, message(&run)),
+            )
+            .await;
+        assert_eq!(
+            (status, &body["code"]),
+            (StatusCode::BAD_REQUEST, &json!("invalid_signature")),
+            "{context}"
+        );
+    }
+    // The v3 message with a description other than B's is refused too.
+    let (run, _, _) = server.start_described(&p, false).await;
+    let (_, status, _) = server.nonce_and_reveal(&p, &run).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let other = auth::Pairing {
+        descriptor: Some(descriptor(("Phone", "macos", "planner"))),
+        ..pairing_of(&run, false)
+    };
+    let (status, body) = server
+        .step(
+            token(&p.a_session),
+            &run,
+            "confirm",
+            confirm(
+                auth::DEVICE_APPROVAL_V3_CONTEXT,
+                auth::approval_message_v3(&other, &hash).expect("described"),
+            ),
+        )
+        .await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::BAD_REQUEST, &json!("invalid_signature"))
+    );
+
+    // The v3 message over B's own description is accepted, and B's digits (which cover the
+    // description) finish the approval.
+    let (run, status, body) = server.start_described(&p, false).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (device_nonce, status, body) = server.nonce_and_reveal(&p, &run).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let v3 = auth::approval_message_v3(&pairing_of(&run, false), &hash).expect("described");
+    let (status, body) = server
+        .step(
+            token(&p.a_session),
+            &run,
+            "confirm",
+            confirm(auth::DEVICE_APPROVAL_V3_CONTEXT, v3),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    // The digits of the plain pairing are not B's digits.
+    let plain = auth::approval_sas(&pairing_of(&run, true), &run.nonce, &device_nonce);
+    let sas = auth::approval_sas(&pairing_of(&run, false), &run.nonce, &device_nonce);
+    assert_ne!(plain, sas);
+    let (status, device) = server
+        .step(token(&p.b_session), &run, "code", json!({"code": sas}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{device}");
+    let listed = server.device_list(&p.a_session).await;
+    let b = listed
+        .iter()
+        .find(|d| d["id"] == p.b_session["device_id"])
+        .expect("b");
+    assert_eq!(b["state"], "trusted");
+    assert_eq!(b["approval_endorsement_hash"], json!(b64(&hash)));
 }

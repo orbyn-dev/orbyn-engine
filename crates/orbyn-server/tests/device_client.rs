@@ -247,7 +247,17 @@ async fn approve(
         .await;
     let step = |name: &str| format!("/v1/devices/approvals/{}/{name}", created.id);
     let view = current_approval(server, new_token).await;
-    let (pd, nonce) = new.join_approval(&view, now_secs()).expect("join");
+    // These devices named their app, so each joins with the description it signed in with
+    // (the honest server lists the same name).
+    let (pd, nonce) = new
+        .join_approval_labelled(
+            &view,
+            now_secs(),
+            &pending.name,
+            wire::DevicePlatform::Linux,
+            wire::DeviceApp::Engineering,
+        )
+        .expect("join");
     let (status, body) = server
         .call(Method::POST, &step("nonce"), new_token, Some(value(&nonce)))
         .await;

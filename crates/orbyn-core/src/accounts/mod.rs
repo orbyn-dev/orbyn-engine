@@ -38,6 +38,7 @@ pub const TOMBSTONE_DAYS: i32 = 400;
 pub use delete::{FRESH_SIGN_IN_SECS, signed_in_recently};
 pub use delete_unused::{DELETE_UNUSED_TTL, REQUEST_JOB_KIND as DELETE_UNUSED_JOB_KIND};
 pub use device_app::App;
+pub use devices::ApprovalView;
 pub use limits::{Limit, Limits};
 pub use push_tokens::PUSH_TOKEN_DAYS;
 pub use second_factor::{ManageProof, TotpEnrolment};
@@ -352,25 +353,6 @@ pub struct Removal {
     pub removed_by: Uuid,
     pub sequence: u64,
     pub signature: [u8; 64],
-}
-
-/// An approval as either of its devices sees it. Each later field is set by
-/// one step, in order: the commitment, the new device's nonce, the approver's
-/// nonce, then the approver's signature and endorsement.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ApprovalView {
-    pub id: Uuid,
-    pub expires_at: DateTime<Utc>,
-    pub created_at: i64,
-    pub approver_id: Uuid,
-    pub approver_keys: DevicePublic,
-    pub device_id: Uuid,
-    pub device_keys: DevicePublic,
-    pub commitment: [u8; 32],
-    pub device_nonce: Option<[u8; 32]>,
-    pub approver_nonce: Option<[u8; 32]>,
-    pub signature: Option<[u8; 64]>,
-    pub endorsement: Option<Vec<u8>>,
 }
 
 /// What the audit log records. Never emails, tokens or keys.

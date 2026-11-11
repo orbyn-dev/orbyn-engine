@@ -25,6 +25,7 @@
 
 mod apply;
 pub mod crypt;
+mod described;
 mod keys;
 mod pairing;
 mod planner;

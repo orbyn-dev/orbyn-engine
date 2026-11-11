@@ -301,9 +301,11 @@ impl Accounts {
             tx.commit().await?;
             return Err(AccountError::InvalidSignature);
         };
-        // Only a v2 signature covers the endorsement, so only then does a hash go with the device.
+        // Only a v2 or v3 signature covers the endorsement, so only then does a hash go with the device.
         let endorsement_hash = match (signed, view.endorsement.as_deref()) {
-            (ApprovalSignature::V2, Some(endorsement)) => Some(endorsement_hash(endorsement)),
+            (ApprovalSignature::V3 | ApprovalSignature::V2, Some(endorsement)) => {
+                Some(endorsement_hash(endorsement))
+            }
             _ => None,
         };
         sqlx::query("UPDATE device_approvals SET state = 'used' WHERE id = $1")
