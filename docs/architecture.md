@@ -7,7 +7,7 @@ The plan lives in the internal Orbyn Platform Plan. This file is the contract th
 | Owner | Path | Owns |
 | --- | --- | --- |
 | Wire contract | `crates/orbyn-contracts` | Serialized types shared by the server and every device; generated TypeScript in `bindings/` |
-| Device primitives | `crates/orbyn-crypto`, `orbyn-sync`, `orbyn-auth-client`, `orbyn-translog`, `orbyn-planner` | Keys, merge, sign-in and planner rules; no IO |
+| Device primitives | `crates/orbyn-crypto`, `orbyn-sync`, `orbyn-auth-client`, `orbyn-translog`, `orbyn-planner`, `orbyn-engineering` | Keys, merge, sign-in, planner and Engineering rules; no IO |
 | Device engine | `crates/orbyn-client` | Encryption, uploads, merges, zone keys and the service-key check; no IO |
 | Device bindings | `crates/orbyn-wasm` | The JavaScript surface over the device crates |
 | Server foundation | `crates/orbyn-core`, `orbyn-store` | Accounts, mail, jobs, feeds, push and the record store |
@@ -38,6 +38,7 @@ never depends on a server crate. `crates/README.md` lists every crate and
 | `orbyn-auth-client` | The OPAQUE ciphersuite, the device side of sign-in, the messages devices sign | Devices (native and WebAssembly); the server uses its ciphersuite |
 | `orbyn-sync` | Hybrid logical clocks and field-by-field merge | Devices |
 | `orbyn-planner` | Tasks, events, lists, repeat rules and their record fields | Devices |
+| `orbyn-engineering` | Orbyn Engineering's zone names and its settings record: field names, defaults, limits, set and keybinding fields, field-by-field merge and the never-synced list. No IO, no dependency on any app. See [engineering.md](engineering.md) | Devices (native and WebAssembly) |
 | `orbyn-client` | The device sync engine: record encryption, uploads, merging incoming changes, zone keys and envelopes, and the check of the account's service key against the transparency log (`verify_service_key`). No IO | Devices (native and WebAssembly) |
 | `orbyn-wasm` | JavaScript bindings (wasm-bindgen) for sign-in, device keys and the sync engine | The web |
 | `orbyn-core` | Configuration, Postgres, migrations, job queue, accounts and devices | Server |

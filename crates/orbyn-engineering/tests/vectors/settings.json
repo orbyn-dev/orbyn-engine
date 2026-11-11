@@ -1,0 +1,1636 @@
+{
+ "version": 1,
+ "about": "Shared inputs and expected results for the Engineering settings record (zone engineering.settings, record id person). The engine crate orbyn-engineering runs this file in tests/settings_vectors.rs; the app can run it against its own port. Devices are A (stamp device 1) and B (stamp device 2). An op at `t` milliseconds is stamped (t, 0, device). Errors are snake_case names of SettingsError. Ops: set [key, value|null], add/remove [list, id], bind rule, unbind {key, when}, fill [list, n] (adds member-000 to member-(n-1)), `as` stamps with another device number (a copy that was synced earlier), `error` expects that error and no change. A value {repeat:{text,count}} is the text repeated and {repeat_list:{text,count}} a list of it. `inject` puts raw fields (name to {value, stamp}) into a device as a newer app would have written them. `merge: [X, Y]` is X accepting Y's fields and then Y accepting X's; the two must end equal, and `expect` is read from X (and `rejected` from X's acceptance). `fill [list, n, len]` pads each id with x to len characters. `fill [list, n, len, prefix]` pads ids made of the prefix and a 3-digit number; `churn [list, n]` adds and removes n distinct ids (each removal 1 ms after its add); `after` ops run on the first device after the merge and its checks. Expectations: has_field / no_field (a field name is present, even as a removal, or absent), record_bytes_over.",
+ "now_ms": 1000000,
+ "derivation": [
+  {
+   "name": "a model id with slashes and dashes",
+   "list": "favorite_models",
+   "id": "openrouter/anthropic/claude-sonnet-4-5",
+   "field": "favorite_models.zfkx7fd4ugwrihff"
+  },
+  {
+   "name": "the same id in the other set has its own list prefix",
+   "list": "hidden_models",
+   "id": "openrouter/anthropic/claude-sonnet-4-5",
+   "field": "hidden_models.zfkx7fd4ugwrihff"
+  },
+  {
+   "name": "another id",
+   "list": "favorite_models",
+   "id": "anthropic/claude-opus-4-1",
+   "field": "favorite_models.ui7ct2m3vvfsz3yl"
+  },
+  {
+   "name": "a chord with capitals and no when",
+   "key": "cmd+shift+K",
+   "when": null,
+   "field": "keybinding.z4rjbdh3flaouhs7"
+  },
+  {
+   "name": "the same chord with a when is another field",
+   "key": "cmd+shift+K",
+   "when": "inputFocus",
+   "field": "keybinding.sraksp7653s72pjx"
+  },
+  {
+   "name": "a chord with a slash",
+   "key": "ctrl+alt+/",
+   "when": null,
+   "field": "keybinding.47rvpylraoqqorza"
+  }
+ ],
+ "keys": [
+  {
+   "key": "default_theme",
+   "ok": "plain"
+  },
+  {
+   "key": "some_future_setting",
+   "ok": "plain_unknown"
+  },
+  {
+   "key": "x.y:z_9",
+   "ok": "plain_unknown"
+  },
+  {
+   "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "ok": "plain_unknown"
+  },
+  {
+   "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "error": "invalid_key"
+  },
+  {
+   "key": "",
+   "error": "invalid_key"
+  },
+  {
+   "key": "Default_Theme",
+   "error": "invalid_key"
+  },
+  {
+   "key": "model-order",
+   "error": "invalid_key"
+  },
+  {
+   "key": "model/order",
+   "error": "invalid_key"
+  },
+  {
+   "key": "favorite_models",
+   "error": "invalid_key"
+  },
+  {
+   "key": "keybindings",
+   "error": "invalid_key"
+  },
+  {
+   "key": "favorite_models.notderived",
+   "error": "invalid_key"
+  },
+  {
+   "key": "favorite_models.zfkx7fd4ugwrihff",
+   "ok": "element"
+  },
+  {
+   "key": "keybinding.z4rjbdh3flaouhs7",
+   "ok": "keybinding"
+  },
+  {
+   "key": "environment_icon",
+   "error": "not_synced"
+  },
+  {
+   "key": "keep_awake_during_runs",
+   "error": "not_synced"
+  },
+  {
+   "key": "background_activity_profile",
+   "error": "not_synced"
+  },
+  {
+   "key": "add_project_base_directory",
+   "error": "not_synced"
+  },
+  {
+   "key": "provider_instances",
+   "error": "not_synced"
+  },
+  {
+   "key": "custom_models",
+   "error": "not_synced"
+  },
+  {
+   "key": "observability",
+   "error": "not_synced"
+  },
+  {
+   "key": "storage_cleanup",
+   "error": "not_synced"
+  },
+  {
+   "key": "worktree_cleanup",
+   "error": "not_synced"
+  },
+  {
+   "key": "app_update_mode",
+   "error": "not_synced"
+  },
+  {
+   "key": "automatic_git_fetch_minutes",
+   "error": "not_synced"
+  },
+  {
+   "key": "provider_health_refresh_minutes",
+   "error": "not_synced"
+  },
+  {
+   "key": "prefer_saved_login",
+   "error": "not_synced"
+  },
+  {
+   "key": "disabled_engines",
+   "error": "not_synced"
+  },
+  {
+   "key": "default_theme_set_at",
+   "error": "not_synced"
+  },
+  {
+   "key": "_deleted",
+   "error": "invalid_key"
+  },
+  {
+   "key": "_x",
+   "error": "invalid_key"
+  },
+  {
+   "key": "x_",
+   "ok": "plain_unknown"
+  }
+ ],
+ "defaults": {
+  "default_theme": "system",
+  "default_engine": "",
+  "default_model": "",
+  "fallback_model": "",
+  "text_generation_model": "",
+  "default_effort": "",
+  "branch_name_prefix": "feat",
+  "branch_name_instructions": "",
+  "response_streaming_mode": "paragraph",
+  "default_permission_mode": "supervised",
+  "default_thread_env_mode": "local",
+  "branch_naming_mode": "static",
+  "quit_confirmation": "direct",
+  "preview_appearance": "system",
+  "auto_thread_titles": true,
+  "open_web_links_in_app": false,
+  "preview_zoom": 1,
+  "default_model_options": {},
+  "model_order": []
+ },
+ "enums": {
+  "default_theme": [
+   "system",
+   "light",
+   "dark",
+   "<a theme id: 1 to 64 of a-z 0-9 _ . : ->"
+  ],
+  "response_streaming_mode": [
+   "paragraph",
+   "turn"
+  ],
+  "default_permission_mode": [
+   "supervised",
+   "auto_edits",
+   "auto",
+   "full_access"
+  ],
+  "default_thread_env_mode": [
+   "local",
+   "worktree"
+  ],
+  "branch_naming_mode": [
+   "static",
+   "semantic",
+   "custom"
+  ],
+  "quit_confirmation": [
+   "direct",
+   "hold",
+   "double_press"
+  ],
+  "preview_appearance": [
+   "system",
+   "light",
+   "dark"
+  ]
+ },
+ "scenarios": [
+  {
+   "name": "plain fields: different keys both survive, the same key goes to the later stamp",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "set": [
+       "default_theme",
+       "dark"
+      ]
+     },
+     {
+      "t": 30,
+      "set": [
+       "default_model",
+       "a/one"
+      ]
+     }
+    ],
+    "B": [
+     {
+      "t": 20,
+      "set": [
+       "branch_name_prefix",
+       "fix"
+      ]
+     },
+     {
+      "t": 25,
+      "set": [
+       "default_model",
+       "b/two"
+      ]
+     }
+    ]
+   },
+   "merge": [
+    "B",
+    "A"
+   ],
+   "expect": {
+    "values": {
+     "default_theme": "dark",
+     "branch_name_prefix": "fix",
+     "default_model": "a/one"
+    }
+   }
+  },
+  {
+   "name": "model_order is replaced whole by the last writer",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "set": [
+       "model_order",
+       [
+        "openrouter/anthropic/claude-sonnet-4-5",
+        "anthropic/claude-opus-4-1"
+       ]
+      ]
+     }
+    ],
+    "B": [
+     {
+      "t": 20,
+      "set": [
+       "model_order",
+       [
+        "anthropic/claude-opus-4-1",
+        "openai/gpt-5-mini"
+       ]
+      ]
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "values": {
+     "model_order": [
+      "anthropic/claude-opus-4-1",
+      "openai/gpt-5-mini"
+     ]
+    }
+   }
+  },
+  {
+   "name": "null puts a plain field back to its default",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "set": [
+       "default_theme",
+       "light"
+      ]
+     },
+     {
+      "t": 20,
+      "set": [
+       "default_theme",
+       null
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [
+    "B",
+    "A"
+   ],
+   "expect": {
+    "values": {
+     "default_theme": "system"
+    }
+   }
+  },
+  {
+   "name": "add on A, remove on B after it: removed",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "add": [
+       "favorite_models",
+       "openrouter/anthropic/claude-sonnet-4-5"
+      ]
+     }
+    ],
+    "B": [
+     {
+      "t": 20,
+      "remove": [
+       "favorite_models",
+       "openrouter/anthropic/claude-sonnet-4-5"
+      ]
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "members": {
+     "favorite_models": []
+    }
+   }
+  },
+  {
+   "name": "remove on B before the add on A: the later add wins",
+   "devices": {
+    "A": [
+     {
+      "t": 30,
+      "add": [
+       "favorite_models",
+       "openrouter/anthropic/claude-sonnet-4-5"
+      ]
+     }
+    ],
+    "B": [
+     {
+      "t": 20,
+      "remove": [
+       "favorite_models",
+       "openrouter/anthropic/claude-sonnet-4-5"
+      ]
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "members": {
+     "favorite_models": [
+      "openrouter/anthropic/claude-sonnet-4-5"
+     ]
+    }
+   }
+  },
+  {
+   "name": "a removal on A is not undone by B's older copy of the element",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "add": [
+       "hidden_models",
+       "anthropic/claude-opus-4-1"
+      ]
+     },
+     {
+      "t": 40,
+      "remove": [
+       "hidden_models",
+       "anthropic/claude-opus-4-1"
+      ]
+     }
+    ],
+    "B": [
+     {
+      "t": 10,
+      "as": 1,
+      "add": [
+       "hidden_models",
+       "anthropic/claude-opus-4-1"
+      ]
+     },
+     {
+      "t": 15,
+      "add": [
+       "favorite_models",
+       "openai/gpt-5-mini"
+      ]
+     }
+    ]
+   },
+   "merge": [
+    "B",
+    "A"
+   ],
+   "expect": {
+    "members": {
+     "hidden_models": [],
+     "favorite_models": [
+      "openai/gpt-5-mini"
+     ]
+    }
+   }
+  },
+  {
+   "name": "concurrent adds of different elements both stay, and sets are sorted",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "add": [
+       "favorite_models",
+       "openrouter/anthropic/claude-sonnet-4-5"
+      ]
+     }
+    ],
+    "B": [
+     {
+      "t": 10,
+      "add": [
+       "favorite_models",
+       "anthropic/claude-opus-4-1"
+      ]
+     },
+     {
+      "t": 11,
+      "add": [
+       "hidden_models",
+       "openai/gpt-5-mini"
+      ]
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "members": {
+     "favorite_models": [
+      "anthropic/claude-opus-4-1",
+      "openrouter/anthropic/claude-sonnet-4-5"
+     ],
+     "hidden_models": [
+      "openai/gpt-5-mini"
+     ]
+    }
+   }
+  },
+  {
+   "name": "the same element added on both is one member",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "add": [
+       "favorite_models",
+       "openrouter/anthropic/claude-sonnet-4-5"
+      ]
+     }
+    ],
+    "B": [
+     {
+      "t": 12,
+      "add": [
+       "favorite_models",
+       "openrouter/anthropic/claude-sonnet-4-5"
+      ]
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "members": {
+     "favorite_models": [
+      "openrouter/anthropic/claude-sonnet-4-5"
+     ]
+    }
+   }
+  },
+  {
+   "name": "keybindings: with and without when are two rules",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "bind": {
+       "key": "cmd+shift+K",
+       "command": "thread.new"
+      }
+     }
+    ],
+    "B": [
+     {
+      "t": 11,
+      "bind": {
+       "key": "cmd+shift+K",
+       "command": "composer.focus",
+       "when": "inputFocus"
+      }
+     },
+     {
+      "t": 12,
+      "bind": {
+       "key": "ctrl+alt+/",
+       "command": "search.open"
+      }
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "keybindings": [
+     {
+      "key": "cmd+shift+K",
+      "command": "thread.new"
+     },
+     {
+      "key": "cmd+shift+K",
+      "command": "composer.focus",
+      "when": "inputFocus"
+     },
+     {
+      "key": "ctrl+alt+/",
+      "command": "search.open"
+     }
+    ]
+   }
+  },
+  {
+   "name": "keybinding add on A, remove on B after it: removed",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "bind": {
+       "key": "cmd+shift+K",
+       "command": "thread.new"
+      }
+     }
+    ],
+    "B": [
+     {
+      "t": 20,
+      "unbind": {
+       "key": "cmd+shift+K",
+       "when": null
+      }
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "keybindings": []
+   }
+  },
+  {
+   "name": "unbinding the rule with a when leaves the one without",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "bind": {
+       "key": "cmd+shift+K",
+       "command": "thread.new"
+      }
+     },
+     {
+      "t": 11,
+      "bind": {
+       "key": "cmd+shift+K",
+       "command": "composer.focus",
+       "when": "inputFocus"
+      }
+     }
+    ],
+    "B": [
+     {
+      "t": 20,
+      "unbind": {
+       "key": "cmd+shift+K",
+       "when": "inputFocus"
+      }
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "keybindings": [
+     {
+      "key": "cmd+shift+K",
+      "command": "thread.new"
+     }
+    ]
+   }
+  },
+  {
+   "name": "rebinding the same key and when replaces the command by stamp",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "bind": {
+       "key": "cmd+shift+K",
+       "command": "thread.new"
+      }
+     }
+    ],
+    "B": [
+     {
+      "t": 20,
+      "bind": {
+       "key": "cmd+shift+K",
+       "command": "thread.fork"
+      }
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "keybindings": [
+     {
+      "key": "cmd+shift+K",
+      "command": "thread.fork"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a remove rule is a rule like any other",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "bind": {
+       "key": "cmd+w",
+       "command": "window.close",
+       "remove": true
+      }
+     }
+    ],
+    "B": []
+   },
+   "merge": [
+    "B",
+    "A"
+   ],
+   "expect": {
+    "keybindings": [
+     {
+      "key": "cmd+w",
+      "command": "window.close",
+      "remove": true
+     }
+    ]
+   }
+  },
+  {
+   "name": "a key from a newer app is kept and passed through an edit and a merge",
+   "inject": {
+    "B": {
+     "future_setting": {
+      "value": {
+       "mode": "turbo"
+      },
+      "stamp": {
+       "millis": 50,
+       "counter": 0,
+       "device": 2
+      }
+     }
+    }
+   },
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "set": [
+       "default_theme",
+       "dark"
+      ]
+     }
+    ],
+    "B": [
+     {
+      "t": 20,
+      "set": [
+       "branch_name_prefix",
+       "fix"
+      ]
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "values": {
+     "default_theme": "dark",
+     "branch_name_prefix": "fix"
+    },
+    "raw": {
+     "future_setting": {
+      "mode": "turbo"
+     }
+    },
+    "unknown": [
+     "future_setting"
+    ]
+   }
+  },
+  {
+   "name": "an enum value a newer app added reads as the default and stays in the record",
+   "inject": {
+    "B": {
+     "quit_confirmation": {
+      "value": "triple_press",
+      "stamp": {
+       "millis": 30,
+       "counter": 0,
+       "device": 2
+      }
+     }
+    }
+   },
+   "devices": {
+    "A": [],
+    "B": []
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "values": {
+     "quit_confirmation": "direct"
+    },
+    "raw": {
+     "quit_confirmation": "triple_press"
+    }
+   }
+  },
+  {
+   "name": "a theme id is accepted for default_theme",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "set": [
+       "default_theme",
+       "orbyn-dim:v2"
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [
+    "B",
+    "A"
+   ],
+   "expect": {
+    "values": {
+     "default_theme": "orbyn-dim:v2"
+    }
+   }
+  },
+  {
+   "name": "writes refuse bad values, unknown and unsynced keys and over-limit values",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "set": [
+       "default_theme",
+       7
+      ],
+      "error": "invalid_value"
+     },
+     {
+      "t": 10,
+      "set": [
+       "quit_confirmation",
+       "never"
+      ],
+      "error": "invalid_value"
+     },
+     {
+      "t": 10,
+      "set": [
+       "preview_zoom",
+       0
+      ],
+      "error": "invalid_value"
+     },
+     {
+      "t": 10,
+      "set": [
+       "preview_zoom",
+       10.5
+      ],
+      "error": "invalid_value"
+     },
+     {
+      "t": 9,
+      "set": [
+       "preview_zoom",
+       10
+      ]
+     },
+     {
+      "t": 9,
+      "set": [
+       "default_model_options",
+       {
+        "effort": "high"
+       }
+      ]
+     },
+     {
+      "t": 10,
+      "set": [
+       "_deleted",
+       true
+      ],
+      "error": "invalid_key"
+     },
+     {
+      "t": 10,
+      "set": [
+       "auto_thread_titles",
+       "yes"
+      ],
+      "error": "invalid_value"
+     },
+     {
+      "t": 10,
+      "set": [
+       "default_model_options",
+       {
+        "effort": [
+         "high"
+        ]
+       }
+      ],
+      "error": "invalid_value"
+     },
+     {
+      "t": 10,
+      "set": [
+       "provider_instances",
+       {
+        "k": "secret"
+       }
+      ],
+      "error": "not_synced"
+     },
+     {
+      "t": 10,
+      "set": [
+       "Default_Model",
+       "x"
+      ],
+      "error": "invalid_key"
+     },
+     {
+      "t": 10,
+      "set": [
+       "some_future_setting",
+       "x"
+      ],
+      "error": "unknown_key"
+     },
+     {
+      "t": 10,
+      "set": [
+       "default_model",
+       {
+        "repeat": {
+         "text": "a",
+         "count": 8193
+        }
+       }
+      ],
+      "error": "too_large"
+     },
+     {
+      "t": 10,
+      "set": [
+       "default_model_options",
+       {
+        "a": {
+         "repeat": {
+          "text": "a",
+          "count": 8200
+         }
+        }
+       }
+      ],
+      "error": "too_large"
+     },
+     {
+      "t": 10,
+      "set": [
+       "default_engine",
+       {
+        "repeat": {
+         "text": "a",
+         "count": 8192
+        }
+       }
+      ],
+      "error": "too_large"
+     },
+     {
+      "t": 10,
+      "set": [
+       "model_order",
+       {
+        "repeat_list": {
+         "text": "m",
+         "count": 501
+        }
+       }
+      ],
+      "error": "too_large"
+     },
+     {
+      "t": 10,
+      "add": [
+       "favorite_models",
+       ""
+      ],
+      "error": "invalid_value"
+     },
+     {
+      "t": 10,
+      "add": [
+       "recent_models",
+       "x"
+      ],
+      "error": "unknown_key"
+     },
+     {
+      "t": 10,
+      "bind": {
+       "key": "",
+       "command": "x"
+      },
+      "error": "invalid_value"
+     },
+     {
+      "t": 10,
+      "set": [
+       "preview_zoom",
+       1.5
+      ]
+     },
+     {
+      "t": 11,
+      "set": [
+       "default_model_options",
+       {
+        "effort": "high",
+        "fast": true,
+        "budget": 2048
+       }
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "values": {
+     "preview_zoom": 1.5,
+     "default_model_options": {
+      "effort": "high",
+      "fast": true,
+      "budget": 2048
+     },
+     "default_model": ""
+    }
+   }
+  },
+  {
+   "name": "a value of exactly 8 KiB of JSON is accepted and one more byte is not",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "set": [
+       "branch_name_instructions",
+       {
+        "repeat": {
+         "text": "a",
+         "count": 8190
+        }
+       }
+      ]
+     },
+     {
+      "t": 11,
+      "set": [
+       "branch_name_instructions",
+       {
+        "repeat": {
+         "text": "a",
+         "count": 8191
+        }
+       }
+      ],
+      "error": "too_large"
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "values": {
+     "branch_name_instructions": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   }
+  },
+  {
+   "name": "the sets and keybindings stop at 500 entries",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "fill": [
+       "favorite_models",
+       500
+      ]
+     },
+     {
+      "t": 11,
+      "add": [
+       "favorite_models",
+       "one-more"
+      ],
+      "error": "too_large"
+     },
+     {
+      "t": 12,
+      "add": [
+       "favorite_models",
+       "member-000"
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "members_count": {
+     "favorite_models": 500
+    }
+   }
+  },
+  {
+   "name": "incoming fields that may not be here are left out and named; the rest merges",
+   "devices": {
+    "A": [],
+    "B": []
+   },
+   "inject": {
+    "B": {
+     "provider_instances": {
+      "value": {
+       "token": "secret"
+      },
+      "stamp": {
+       "millis": 10,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "Bad_Key": {
+      "value": 1,
+      "stamp": {
+       "millis": 10,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "favorite_models.aaaaaaaaaaaaaaaa": {
+      "value": "not/the/derived/id",
+      "stamp": {
+       "millis": 10,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "keybinding.aaaaaaaaaaaaaaaa": {
+      "value": {
+       "key": "x",
+       "command": "y"
+      },
+      "stamp": {
+       "millis": 10,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "default_theme": {
+      "value": "dark",
+      "stamp": {
+       "millis": 11,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "default_engine": {
+      "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "stamp": {
+       "millis": 12,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "branch_name_prefix": {
+      "value": "future",
+      "stamp": {
+       "millis": 4600001,
+       "counter": 0,
+       "device": 2
+      }
+     }
+    }
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "values": {
+     "default_theme": "dark",
+     "default_engine": "",
+     "branch_name_prefix": "feat"
+    },
+    "rejected": [
+     {
+      "name": "Bad_Key",
+      "error": "invalid_key"
+     },
+     {
+      "name": "branch_name_prefix",
+      "error": "too_far_ahead"
+     },
+     {
+      "name": "default_engine",
+      "error": "too_large"
+     },
+     {
+      "name": "favorite_models.aaaaaaaaaaaaaaaa",
+      "error": "invalid_value"
+     },
+     {
+      "name": "keybinding.aaaaaaaaaaaaaaaa",
+      "error": "invalid_value"
+     },
+     {
+      "name": "provider_instances",
+      "error": "not_synced"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a set field or rule that does not match its own name is not read",
+   "inject": {
+    "A": {
+     "favorite_models.aaaaaaaaaaaaaaaa": {
+      "value": "lies/about/its/name",
+      "stamp": {
+       "millis": 10,
+       "counter": 0,
+       "device": 1
+      }
+     },
+     "keybinding.aaaaaaaaaaaaaaaa": {
+      "value": {
+       "key": "x",
+       "command": "y"
+      },
+      "stamp": {
+       "millis": 10,
+       "counter": 0,
+       "device": 1
+      }
+     }
+    }
+   },
+   "devices": {
+    "A": [
+     {
+      "t": 20,
+      "add": [
+       "favorite_models",
+       "real/model"
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "members": {
+     "favorite_models": [
+      "real/model"
+     ]
+    },
+    "keybindings": []
+   }
+  },
+  {
+   "name": "the whole record stops at 64 KiB, with the stamps counted",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "fill": [
+       "favorite_models",
+       200,
+       512
+      ],
+      "error": "too_large"
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "members_between": {
+     "favorite_models": [
+      105,
+      110
+     ]
+    }
+   }
+  },
+  {
+   "name": "a peer cannot mark the record deleted: names starting with _ are refused in both directions",
+   "inject": {
+    "B": {
+     "_deleted": {
+      "value": true,
+      "stamp": {
+       "millis": 50,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "_other": {
+      "value": 1,
+      "stamp": {
+       "millis": 50,
+       "counter": 0,
+       "device": 2
+      }
+     },
+     "default_theme": {
+      "value": "dark",
+      "stamp": {
+       "millis": 51,
+       "counter": 0,
+       "device": 2
+      }
+     }
+    }
+   },
+   "devices": {
+    "A": [],
+    "B": []
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "expect": {
+    "values": {
+     "default_theme": "dark"
+    },
+    "no_field": [
+     "_deleted",
+     "_other"
+    ],
+    "unknown": [],
+    "rejected": [
+     {
+      "name": "_deleted",
+      "error": "invalid_key"
+     },
+     {
+      "name": "_other",
+      "error": "invalid_key"
+     }
+    ]
+   }
+  },
+  {
+   "name": "two devices that each filled the record converge, and a local write after it is refused",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "fill": [
+       "favorite_models",
+       250,
+       60,
+       "a-"
+      ]
+     }
+    ],
+    "B": [
+     {
+      "t": 10,
+      "fill": [
+       "favorite_models",
+       250,
+       60,
+       "b-"
+      ]
+     }
+    ]
+   },
+   "merge": [
+    "A",
+    "B"
+   ],
+   "after": [
+    {
+     "t": 20,
+     "set": [
+      "default_theme",
+      "dark"
+     ],
+     "error": "too_large"
+    },
+    {
+     "t": 20,
+     "remove": [
+      "favorite_models",
+      "a-000xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     ]
+    }
+   ],
+   "expect": {
+    "members_count": {
+     "favorite_models": 500
+    },
+    "record_bytes_over": 65536
+   }
+  },
+  {
+   "name": "the record cap counts the real capacity: about 360 favourites of 60 characters, below the 500-entry list cap",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "fill": [
+       "favorite_models",
+       500,
+       60,
+       "m-"
+      ],
+      "error": "too_large"
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "members_between": {
+     "favorite_models": [
+      380,
+      430
+     ]
+    }
+   }
+  },
+  {
+   "name": "churn of distinct ids leaves nulls; a young write is refused and an old-enough one compacts them",
+   "devices": {
+    "A": [
+     {
+      "t": 1000,
+      "churn": [
+       "favorite_models",
+       650
+      ]
+     },
+     {
+      "t": 1500,
+      "set": [
+       "branch_name_instructions",
+       {
+        "repeat": {
+         "text": "a",
+         "count": 8000
+        }
+       }
+      ],
+      "error": "too_large"
+     },
+     {
+      "t": 7776005000,
+      "set": [
+       "branch_name_instructions",
+       {
+        "repeat": {
+         "text": "a",
+         "count": 8000
+        }
+       }
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "values": {
+     "branch_name_instructions": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "members": {
+     "favorite_models": []
+    },
+    "no_field": [
+     "favorite_models.pqwrgfoui375sfrj",
+     "favorite_models.sfl5no7gokdpa2s6"
+    ]
+   }
+  },
+  {
+   "name": "a removal older than 90 days is dropped by a local write and a younger one is kept",
+   "devices": {
+    "A": [
+     {
+      "t": 1000,
+      "add": [
+       "favorite_models",
+       "old/model"
+      ]
+     },
+     {
+      "t": 1001,
+      "remove": [
+       "favorite_models",
+       "old/model"
+      ]
+     },
+     {
+      "t": 7775999000,
+      "add": [
+       "favorite_models",
+       "young/model"
+      ]
+     },
+     {
+      "t": 7776001000,
+      "remove": [
+       "favorite_models",
+       "young/model"
+      ]
+     },
+     {
+      "t": 7776001002,
+      "set": [
+       "default_theme",
+       "dark"
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "values": {
+     "default_theme": "dark"
+    },
+    "no_field": [
+     "favorite_models.ij2qhgqwdrcx6x5b"
+    ],
+    "has_field": [
+     "favorite_models.vkbpj6d6br4e5ovs"
+    ]
+   }
+  },
+  {
+   "name": "a removal exactly 90 days old is kept",
+   "devices": {
+    "A": [
+     {
+      "t": 1000,
+      "add": [
+       "hidden_models",
+       "edge/model"
+      ]
+     },
+     {
+      "t": 1001,
+      "remove": [
+       "hidden_models",
+       "edge/model"
+      ]
+     },
+     {
+      "t": 7776001001,
+      "set": [
+       "default_theme",
+       "dark"
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "has_field": [
+     "hidden_models.i5xqti7lcfqmk4ym"
+    ]
+   }
+  },
+  {
+   "name": "ids are compared by raw bytes: NFC and NFD forms of the same name are two members",
+   "devices": {
+    "A": [
+     {
+      "t": 10,
+      "add": [
+       "favorite_models",
+       "café/model"
+      ]
+     },
+     {
+      "t": 11,
+      "add": [
+       "favorite_models",
+       "café/model"
+      ]
+     }
+    ],
+    "B": []
+   },
+   "merge": [],
+   "expect": {
+    "members": {
+     "favorite_models": [
+      "café/model",
+      "café/model"
+     ]
+    }
+   }
+  }
+ ]
+}
