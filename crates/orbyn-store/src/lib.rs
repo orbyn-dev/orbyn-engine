@@ -233,6 +233,9 @@ pub enum StoreError {
     /// five minutes.
     #[error("the protection setting is not signed by this device now")]
     InvalidProtectionSignature,
+    /// The session did not finish its sign-in in the last ten minutes.
+    #[error("sign in again to do this")]
+    ReauthenticationRequired,
     /// The setting is not the head's successor. Carries the current head, if any.
     #[error("the protection setting does not follow the current one")]
     ProtectionConflict(Option<Box<ProtectionRecord>>),

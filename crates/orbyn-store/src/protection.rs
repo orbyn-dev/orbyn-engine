@@ -147,6 +147,13 @@ impl Store {
         {
             return Err(StoreError::InvalidProtectionSignature);
         }
+        // The password must have been used in the last ten minutes, as for removing a device. This
+        // comes before the limiter, so a stale session uses up nothing.
+        let mut conn = self.pool.acquire().await?;
+        if !orbyn_core::accounts::signed_in_recently(&mut conn, session).await? {
+            return Err(StoreError::ReauthenticationRequired);
+        }
+        drop(conn);
         // Counted per account, after the signature verified, and only for a setting that is
         // stored: a request that does not fit the chain (a conflict, a replay) and stores nothing
         // gives its slot back, so requests that never fit cannot use up what the owner's valid

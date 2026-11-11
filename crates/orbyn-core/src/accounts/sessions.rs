@@ -158,11 +158,14 @@ impl Accounts {
     }
 
     /// Signs every session of the account out, this one included. Trusted
-    /// devices only, so a pending device cannot sign the others out.
+    /// devices only, so a pending device cannot sign the others out, and only from a session
+    /// that finished its sign-in in the last ten minutes (`reauthentication_required`).
     pub async fn revoke_all_sessions(&self, client: &Client, session: &Session) -> Result<u64> {
         let mut tx = self.pool.begin().await?;
         Self::refuse_during_deletion_shared(&mut tx, session.account_id).await?;
         self.require_trusted(&mut tx, session).await?;
+        // Only a bearer token is needed otherwise, so the password must have been used lately.
+        self.require_recent_sign_in(&mut tx, session).await?;
         let revoked = sqlx::query(
             "UPDATE sessions SET revoked_at = now() WHERE account_id = $1 AND revoked_at IS NULL",
         )

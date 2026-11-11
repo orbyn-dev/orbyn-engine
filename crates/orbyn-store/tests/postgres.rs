@@ -2217,6 +2217,19 @@ async fn keyed_device(db: &Database, account_id: Uuid, state: &str) -> (Session,
             DeviceState::Pending
         },
     };
+    // The session has a row, signed in just now: a protection change needs a recent sign-in.
+    let token = [Uuid::new_v4().into_bytes(), Uuid::new_v4().into_bytes()].concat();
+    sqlx::query(
+        "INSERT INTO sessions (id, token_digest, account_id, device_id, expires_at, hard_expires_at)
+         VALUES ($1, $2, $3, $4, now() + interval '30 days', now() + interval '365 days')",
+    )
+    .bind(session.id)
+    .bind(&token)
+    .bind(account_id)
+    .bind(id)
+    .execute(db.pool())
+    .await
+    .expect("session");
     (session, keys)
 }
 
@@ -3116,6 +3129,72 @@ async fn a_protection_setting_must_be_the_heads_successor() {
             .0
             .is_empty()
     );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn changing_protection_needs_a_sign_in_from_the_last_ten_minutes() {
+    let (store, db) = store().await;
+    let account = account(&db).await;
+    let (me, keys) = keyed_device(&db, account, "trusted").await;
+    let genesis = auth::PROTECTION_GENESIS;
+    let now = now_secs();
+    let first = setting(&me, &keys, ProtectionLevel::Standard, 1, genesis, now);
+    let age = |minutes: i32| {
+        let db = &db;
+        let id = me.id;
+        async move {
+            sqlx::query(
+                "UPDATE sessions SET authenticated_at = now() - make_interval(mins => $2) WHERE id = $1",
+            )
+            .bind(id)
+            .bind(minutes)
+            .execute(db.pool())
+            .await
+            .expect("age");
+        }
+    };
+    // A session that signed in 11 minutes ago is asked to sign in again, and nothing is stored or
+    // counted: the same signed setting works once the sign-in is recent.
+    age(11).await;
+    assert!(matches!(
+        store.put_protection(&me, &first).await,
+        Err(StoreError::ReauthenticationRequired)
+    ));
+    assert!(
+        store
+            .protection_chain(&me, 1)
+            .await
+            .expect("chain")
+            .0
+            .is_empty()
+    );
+    age(9).await;
+    store.put_protection(&me, &first).await.expect("recent");
+    // Advanced is a change like any other, and a revoked session is never recent.
+    let advanced = setting(
+        &me,
+        &keys,
+        ProtectionLevel::Advanced,
+        2,
+        hash_of(&me, &first),
+        now,
+    );
+    age(11).await;
+    assert!(matches!(
+        store.put_protection(&me, &advanced).await,
+        Err(StoreError::ReauthenticationRequired)
+    ));
+    age(0).await;
+    sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = $1")
+        .bind(me.id)
+        .execute(db.pool())
+        .await
+        .expect("revoke");
+    assert!(matches!(
+        store.put_protection(&me, &advanced).await,
+        Err(StoreError::ReauthenticationRequired)
+    ));
 }
 
 #[tokio::test]

@@ -39,7 +39,7 @@ pub struct ManageProof {
     pub signature: [u8; 64],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Manage {
     Enrol,
     Confirm,
@@ -365,6 +365,11 @@ impl Accounts {
         );
         orbyn_crypto::verify(&keys, TOTP_MANAGE_CONTEXT, &message, &proof.signature)
             .map_err(|_| AccountError::DeviceProofRequired)?;
+        // Turning the factor off needs the password too: a sign-in in the last ten minutes. This
+        // comes before the signature is marked as used, so a refusal for it burns nothing.
+        if action == Manage::Disable {
+            self.require_recent_sign_in(tx, session).await?;
+        }
         // Each signed change is accepted once: its time must be after the last one accepted for
         // this device and action. The mark commits on its own, before the change runs, so even a
         // request whose change then fails (factor not on yet, a wrong code, the limit) cannot be

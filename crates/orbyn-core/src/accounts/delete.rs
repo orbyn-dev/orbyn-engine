@@ -40,10 +40,31 @@ use uuid::Uuid;
 
 /// How long a scheduled deletion waits.
 pub const GRACE_DAYS: i32 = 7;
-/// How recent a sign-in must be to schedule a deletion or to cancel from a pending device.
-const FRESH_SIGN_IN_SECS: i32 = 10 * 60;
+/// How recent a sign-in must be for the actions that need one: scheduling a deletion, cancelling
+/// from a pending device, removing a device, turning the second factor off, changing protection
+/// and signing every session out.
+pub const FRESH_SIGN_IN_SECS: i32 = 10 * 60;
 /// Audit rows' addresses looked up to remove sign-in limiter rows that pair an email with one.
 const MAX_ADDRESSES: i64 = 200;
+
+/// Whether `session` finished its sign-in (the OPAQUE login, with the second factor where the
+/// account has one and no trusted device skipped it) in the last [`FRESH_SIGN_IN_SECS`] seconds.
+/// A revoked or unknown session is not recent. The record store uses it for protection changes.
+pub async fn signed_in_recently(
+    conn: &mut sqlx::PgConnection,
+    session: &Session,
+) -> std::result::Result<bool, sqlx::Error> {
+    let fresh: Option<bool> = sqlx::query_scalar(
+        "SELECT authenticated_at > now() - make_interval(secs => $3) FROM sessions
+         WHERE id = $1 AND account_id = $2 AND revoked_at IS NULL",
+    )
+    .bind(session.id)
+    .bind(session.account_id)
+    .bind(f64::from(FRESH_SIGN_IN_SECS))
+    .fetch_optional(conn)
+    .await?;
+    Ok(fresh == Some(true))
+}
 
 impl Accounts {
     /// Schedules the deletion of the account of `session` and says when it will happen. `code` or
@@ -548,21 +569,26 @@ impl Accounts {
     }
 
     /// True when the session finished its sign-in in the last ten minutes.
-    async fn signed_in_recently(
+    pub(super) async fn signed_in_recently(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         session: &Session,
     ) -> Result<bool> {
-        let fresh: Option<bool> = sqlx::query_scalar(
-            "SELECT authenticated_at > now() - make_interval(secs => $3) FROM sessions
-             WHERE id = $1 AND account_id = $2 AND revoked_at IS NULL",
-        )
-        .bind(session.id)
-        .bind(session.account_id)
-        .bind(f64::from(FRESH_SIGN_IN_SECS))
-        .fetch_optional(&mut **tx)
-        .await?;
-        Ok(fresh == Some(true))
+        Ok(signed_in_recently(&mut **tx, session).await?)
+    }
+
+    /// [`AccountError::ReauthenticationRequired`] unless the session finished its sign-in in the
+    /// last ten minutes. Runs after the device's own proof, and before anything is used up.
+    pub(super) async fn require_recent_sign_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session: &Session,
+    ) -> Result<()> {
+        if self.signed_in_recently(tx, session).await? {
+            Ok(())
+        } else {
+            Err(AccountError::ReauthenticationRequired)
+        }
     }
 }
 

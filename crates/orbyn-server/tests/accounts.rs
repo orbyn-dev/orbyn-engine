@@ -586,6 +586,7 @@ fn token(session: &Value) -> &str {
 /// Two accounts' worth of setup: a signed-up account with device A, and device B
 /// signed in and pending.
 struct Pair {
+    email: String,
     a: DeviceKeys,
     a_session: Value,
     b: DeviceKeys,
@@ -601,6 +602,7 @@ async fn pair(server: &Server) -> Pair {
     let b_session = server.login(&email, b"correct horse", &b).await;
     assert_eq!(b_session["device_state"], "pending");
     Pair {
+        email,
         account_id: uuid_of(&a_session["account_id"]),
         a,
         a_session,
@@ -758,6 +760,139 @@ async fn a_wrong_password_and_an_unknown_email_look_the_same() {
         (status, &body["code"]),
         (StatusCode::UNAUTHORIZED, &json!("login_failed"))
     );
+}
+
+/// A 401 `reauthentication_required`: the session's sign-in is older than ten minutes.
+fn needs_a_new_sign_in(answer: &(StatusCode, Value)) -> bool {
+    answer.0 == StatusCode::UNAUTHORIZED && answer.1["code"] == json!("reauthentication_required")
+}
+
+/// The first protection setting, signed now.
+fn first_protection_body(session: &Value, keys: &DeviceKeys, level: &str) -> Value {
+    protection_body(
+        session,
+        keys,
+        level,
+        1,
+        &auth::PROTECTION_GENESIS,
+        chrono_now(),
+    )
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn removing_a_device_changing_protection_and_signing_everyone_out_need_a_recent_sign_in() {
+    let _turn = TURN.lock().await;
+    let server = server().await;
+    let p = pair(&server).await;
+    server.approve_fully(&p).await; // both devices are trusted now
+    let b_id = uuid_of(&p.b_session["device_id"]);
+    let stale = &p.a_session;
+    server.age_session(&stale["device_id"], 11).await;
+
+    // A stolen key and token are not enough: each change asks for a new sign-in first.
+    let answer = server
+        .remove(token(stale), &p.a, p.account_id, b_id, &p.b.public())
+        .await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+    for level in ["standard", "advanced"] {
+        let answer = server
+            .call(
+                Method::POST,
+                "/v1/keychain/protection",
+                Some(token(stale)),
+                Some(first_protection_body(stale, &p.a, level)),
+            )
+            .await;
+        assert!(needs_a_new_sign_in(&answer), "{level}: {answer:?}");
+    }
+    let answer = server
+        .call(Method::DELETE, "/v1/sessions", Some(token(stale)), None)
+        .await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+    // Signing out only this device stays open, and nothing above changed anything: B is still
+    // trusted and the stale token still works.
+    let (status, list) = server
+        .call(Method::GET, "/v1/devices", Some(token(stale)), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert!(
+        list["devices"]
+            .as_array()
+            .expect("devices")
+            .iter()
+            .any(|d| d["id"] == json!(b_id.to_string()) && d["state"] == json!("trusted")),
+        "{list}"
+    );
+
+    // A wrong password does not refresh anything: a forged finalization is refused and the
+    // session is as stale as before.
+    let (_, _, started) = server.login_start(&p.email, b"correct horse").await;
+    let (status, body) = server.login_finish(&started, &[7u8; 64], &p.a).await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::UNAUTHORIZED, &json!("login_failed"))
+    );
+    let answer = server
+        .remove(token(stale), &p.a, p.account_id, b_id, &p.b.public())
+        .await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+
+    // Signing in again with the password from the same device (the OPAQUE sign-in, which a
+    // trusted device's key finishes without an approval) gives a session that is recent.
+    let fresh = server.login(&p.email, b"correct horse", &p.a).await;
+    assert_eq!(fresh["device_state"], "trusted");
+    assert_eq!(fresh["device_id"], stale["device_id"]);
+    let (status, body) = server
+        .call(
+            Method::POST,
+            "/v1/keychain/protection",
+            Some(token(&fresh)),
+            Some(first_protection_body(&fresh, &p.a, "standard")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = server
+        .remove(token(&fresh), &p.a, p.account_id, b_id, &p.b.public())
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // The second factor: turning it off needs the new sign-in too, and the refusal does not use
+    // up the signature.
+    // Turning it on is not one of the four: an old sign-in is enough.
+    server.age_session(&fresh["device_id"], 11).await;
+    let (_secret, _) = server.enable_totp(&fresh, &p.a).await;
+    let captured = proof_at(&fresh, &p.a, "disable", "", next_signed_at());
+    let answer = server
+        .call(
+            Method::POST,
+            "/v1/accounts/totp/disable",
+            Some(token(&fresh)),
+            Some(captured.clone()),
+        )
+        .await;
+    assert!(needs_a_new_sign_in(&answer), "{answer:?}");
+    server.age_session(&fresh["device_id"], 9).await;
+    let (status, body) = server
+        .call(
+            Method::POST,
+            "/v1/accounts/totp/disable",
+            Some(token(&fresh)),
+            Some(captured),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Everything signs out only from a recent sign-in.
+    let again = server.login(&p.email, b"correct horse", &p.a).await;
+    let (status, _) = server
+        .call(Method::DELETE, "/v1/sessions", Some(token(&again)), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = server
+        .call(Method::GET, "/v1/devices", Some(token(&again)), None)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
