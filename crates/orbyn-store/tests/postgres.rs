@@ -3133,13 +3133,12 @@ async fn a_protection_setting_must_be_the_heads_successor() {
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
-async fn changing_protection_needs_a_sign_in_from_the_last_ten_minutes() {
+async fn changing_protection_needs_a_sign_in_from_the_last_ten_minutes_except_the_first_standard() {
     let (store, db) = store().await;
     let account = account(&db).await;
     let (me, keys) = keyed_device(&db, account, "trusted").await;
     let genesis = auth::PROTECTION_GENESIS;
     let now = now_secs();
-    let first = setting(&me, &keys, ProtectionLevel::Standard, 1, genesis, now);
     let age = |minutes: i32| {
         let db = &db;
         let id = me.id;
@@ -3154,11 +3153,12 @@ async fn changing_protection_needs_a_sign_in_from_the_last_ten_minutes() {
             .expect("age");
         }
     };
-    // A session that signed in 11 minutes ago is asked to sign in again, and nothing is stored or
-    // counted: the same signed setting works once the sign-in is recent.
+    // A session that signed in 11 minutes ago: a first setting that is Advanced is asked to sign in
+    // again, and nothing is stored or counted.
     age(11).await;
+    let first_advanced = setting(&me, &keys, ProtectionLevel::Advanced, 1, genesis, now);
     assert!(matches!(
-        store.put_protection(&me, &first).await,
+        store.put_protection(&me, &first_advanced).await,
         Err(StoreError::ReauthenticationRequired)
     ));
     assert!(
@@ -3169,30 +3169,44 @@ async fn changing_protection_needs_a_sign_in_from_the_last_ten_minutes() {
             .0
             .is_empty()
     );
+    // The first setting, when Standard, is accepted from the same old session: the Planner signs it
+    // on the first real action, which can be days after pairing.
+    let first = setting(&me, &keys, ProtectionLevel::Standard, 1, genesis, now);
+    store
+        .put_protection(&me, &first)
+        .await
+        .expect("first standard");
+    // Every later setting needs the sign-in, either level.
+    let first_hash = hash_of(&me, &first);
+    let second_standard = setting(&me, &keys, ProtectionLevel::Standard, 2, first_hash, now);
+    let second_advanced = setting(&me, &keys, ProtectionLevel::Advanced, 2, first_hash, now);
+    for later in [&second_standard, &second_advanced] {
+        assert!(matches!(
+            store.put_protection(&me, later).await,
+            Err(StoreError::ReauthenticationRequired)
+        ));
+    }
     age(9).await;
-    store.put_protection(&me, &first).await.expect("recent");
-    // Advanced is a change like any other, and a revoked session is never recent.
-    let advanced = setting(
+    store
+        .put_protection(&me, &second_advanced)
+        .await
+        .expect("recent");
+    // A revoked session is never recent.
+    let third = setting(
         &me,
         &keys,
-        ProtectionLevel::Advanced,
-        2,
-        hash_of(&me, &first),
+        ProtectionLevel::Standard,
+        3,
+        hash_of(&me, &second_advanced),
         now,
     );
-    age(11).await;
-    assert!(matches!(
-        store.put_protection(&me, &advanced).await,
-        Err(StoreError::ReauthenticationRequired)
-    ));
-    age(0).await;
     sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = $1")
         .bind(me.id)
         .execute(db.pool())
         .await
         .expect("revoke");
     assert!(matches!(
-        store.put_protection(&me, &advanced).await,
+        store.put_protection(&me, &third).await,
         Err(StoreError::ReauthenticationRequired)
     ));
 }

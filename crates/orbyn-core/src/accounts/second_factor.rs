@@ -365,9 +365,11 @@ impl Accounts {
         );
         orbyn_crypto::verify(&keys, TOTP_MANAGE_CONTEXT, &message, &proof.signature)
             .map_err(|_| AccountError::DeviceProofRequired)?;
-        // Turning the factor off needs the password too: a sign-in in the last ten minutes. This
+        // Turning the factor off, and starting to turn it on, need the password too: a sign-in in
+        // the last ten minutes. (A stolen key could otherwise switch on a factor the thief
+        // controls.) Confirming is not gated: it needs the secret that the gated start showed. This
         // comes before the signature is marked as used, so a refusal for it burns nothing.
-        if action == Manage::Disable {
+        if matches!(action, Manage::Disable | Manage::Enrol) {
             self.require_recent_sign_in(tx, session).await?;
         }
         // Each signed change is accepted once: its time must be after the last one accepted for
