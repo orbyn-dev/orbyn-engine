@@ -128,17 +128,33 @@ fn apply(settings: &mut Settings, op: &Value, device: u64) {
     }
 }
 
-fn device(ops: Option<&Value>, injected: Option<&Value>, id: u64) -> Settings {
-    let mut settings = Settings::default();
-    for op in ops.and_then(Value::as_array).into_iter().flatten() {
+/// A device after its stored record and ops, and the fields it would put on the wire: its own
+/// plus whatever a newer or hostile app injected, which `Settings` never holds.
+fn device(case: &Value, label: &str, id: u64) -> (Settings, Fields) {
+    let stored: Fields = match case["stored"].get(label) {
+        Some(map) => serde_json::from_value(map.clone()).expect("stored fields"),
+        None => Fields::default(),
+    };
+    let mut settings = Settings::from_fields(stored);
+    for op in case["devices"]
+        .get(label)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         apply(&mut settings, op, id);
     }
-    let mut fields = settings.into_fields();
-    for (name, field) in injected.and_then(Value::as_object).into_iter().flatten() {
+    let mut wire = settings.fields().clone();
+    for (name, field) in case["inject"]
+        .get(label)
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
         let field: orbyn_sync::Field = serde_json::from_value(field.clone()).expect("a field");
-        fields.0.insert(name.clone(), field);
+        wire.0.insert(name.clone(), field);
     }
-    Settings::from_fields(fields)
+    (settings, wire)
 }
 
 #[test]
@@ -272,16 +288,14 @@ fn scenarios() {
     for case in all["scenarios"].as_array().expect("scenarios") {
         let name = case["name"].as_str().expect("name");
         let mut devices = [("A", 1u64), ("B", 2u64)].map(|(label, id)| {
-            (
-                label,
-                device(case["devices"].get(label), case["inject"].get(label), id),
-            )
+            let (settings, wire) = device(case, label, id);
+            (label, settings, wire)
         });
         let merge = case["merge"].as_array().expect("merge");
         if let [x, y] = merge.as_slice() {
             let index = |v: &Value| usize::from(v.as_str() == Some("B"));
             let (x, y) = (index(x), index(y));
-            let theirs = devices[y].1.fields().clone();
+            let theirs = devices[y].2.clone();
             let accepted = devices[x].1.accept_remote(&theirs, now);
             if let Some(want) = case["expect"].get("rejected") {
                 let got: Vec<Value> = accepted
