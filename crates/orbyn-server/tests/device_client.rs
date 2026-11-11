@@ -9,7 +9,8 @@ use orbyn_core::accounts::{AuthSecrets, Limit, Limits};
 use orbyn_core::{Accounts, Database};
 use orbyn_device_client::{
     ApproverState, ClientConfig, DeviceApi, DeviceClient, DeviceError, HttpApi, KeyStore,
-    MemoryStore, Notice, NoticeConfig, SignInOutcome, SignUpRequest, SyncState, SystemClock,
+    MemoryStore, Notice, NoticeConfig, Password, SignInOutcome, SignUpRequest, SyncState,
+    SystemClock,
 };
 use orbyn_server::{AppState, Readiness, router};
 use orbyn_store::{Hub, Store};
@@ -113,8 +114,8 @@ impl Server {
 
 type Client = DeviceClient<HttpApi, MemoryStore, SystemClock>;
 
-fn password() -> Zeroizing<String> {
-    Zeroizing::new(PASSWORD.to_owned())
+fn password() -> Password {
+    Password::new(PASSWORD)
 }
 
 fn email() -> String {

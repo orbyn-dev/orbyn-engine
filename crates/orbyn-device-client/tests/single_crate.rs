@@ -4,9 +4,9 @@
 
 use orbyn_device_client::{
     Applied, ClientConfig, ClientError, Device, DeviceApp, DeviceKeys, DeviceList, DevicePlatform,
-    DevicePublic, DeviceRemoval, DeviceState, Engine, Fields, KeyStore, Local, MemoryStore, Peer,
-    PendingApproval, Quarantined, RefusedEnvelope, RejectedFields, Snapshot, Stamp, StoredIdentity,
-    SyncReport, Trashed, Zeroizing, ZoneReport,
+    DevicePublic, DeviceRemoval, DeviceState, Engine, Fields, KeyStore, Local, MemoryStore,
+    Password, Peer, PendingApproval, Quarantined, RefusedEnvelope, RejectedFields, Snapshot, Stamp,
+    StoredIdentity, SyncReport, Trashed, Zeroizing, ZoneReport,
 };
 
 /// A host's `ClientConfig` is written with the re-exported platform and app types.
@@ -85,6 +85,12 @@ fn a_host_drives_the_engine_and_a_key_store_with_the_re_exported_types() {
         })
         .expect("save");
     assert!(store.load().expect("load").is_some());
+}
+
+#[test]
+fn a_host_builds_a_password_from_this_crate_alone() {
+    let password = Password::new("hunter2 but longer");
+    assert!(!format!("{password:?}").contains("hunter2"));
 }
 
 #[test]
