@@ -4,8 +4,8 @@
 
 It ships in three pull requests:
 
-1. **This one.** The design, the crate skeleton and sign-up, sign-in, the re-login and sign-out.
-2. **Sync.** Push and pull per zone with plain records in and out (sealing, opening and zone keys inside), the notices stream and the status watch.
+1. **Sign-up and sign-in** (merged). The design, the crate skeleton and sign-up, sign-in, the re-login and sign-out.
+2. **Sync** (this document's second half). Push and pull per zone, zone keys in and out, the notices stream and the status watch.
 3. **Approval and the label.** Approval digits, approve and deny, `devices()`, `remove_device`, and the device `app` label bound into the signed register message (engine#73).
 
 ## What the host supplies
@@ -76,3 +76,29 @@ An error never carries a password, a token, a code, a key or a URL. `Request` an
 
 - `tests/client.rs` runs the client against an in-memory engine (`tests/support`) that speaks the **real OPAQUE server side** and checks the real signatures: proof of work, invite, code, trusted start, second factor, re-login after eleven minutes, account gone, rate limit, and that no request body holds the password. The same file serves a raw HTTP reply to check that redirects are not followed and `Retry-After` is read.
 - `tests/local_stack.rs` (ignored by default, and skipped with a printed note unless `ORBYN_LOCAL_STACK=1`, so `cargo test -- --include-ignored` in CI passes without a stack) runs sign-up, a second pending device, a wrong password, the re-login and sign-out against the real engine on `scripts/local.sh up`, using `scripts/local.sh invite-code` and `scripts/local.sh latest-code <email>`.
+
+## Sync
+
+The records go in and out as plain fields (`orbyn_sync::Fields`: a value and a stamp for each field, merged field by field). Sealing, opening and the zone keys are inside `orbyn_client::Engine`, which the client opens and the host holds.
+
+- `open_engine(snapshot)` makes the engine for this device: from the host's snapshot, or empty the first time. The snapshot (`engine.snapshot()`, serialisable) holds the zone keys and the cache, so **the host seals it under the vault key** before it touches disk. A snapshot of another account or device is refused.
+- The host stages with the engine (`stage`, `delete`, `tick`) and reads with it (`record`, `records`); both work offline and never block.
+- `sync_all(&mut engine)` is one pass: the device list (the engine verifies the approvals itself), the zone keys other devices sent (accepted, then the records that could not be opened are tried again), the zone list compared with this device's tokens, and every zone that changed on the server or has local changes, **pulled then pushed**. A zone made here is created on the server with a new key, which is sealed to the account's other trusted devices. `sync_zone` does one zone; `send_keys` hands a zone's keys to the trusted devices (the approver calls it for every zone after an approval).
+- A pull follows the change pages; a 410 `token_expired` starts the zone again (three times at most). A push uploads in batches; a 409 `record_changed` merges what the server has and goes again. A zone this device has no key for yet is reported (`waiting_for_key`), not failed: another device sends the key. `TooLarge` drops the batch the server will not take.
+- A pass that cannot reach the server is `Transport`, changes nothing and leaves everything staged. Nothing here ever blocks the host's own work.
+
+### Status
+
+`status()` is a `tokio::sync::watch` of `SyncStatus { state, last_synced, last_error }`. The states are `Idle`, `Syncing`, `Offline`, and the ones that need the host to act: `SignedOut`, `ReauthenticationRequired` (call `reauthenticate`), `SessionExpired`, `AccountGone` (the app destroys key material) and `Failed`. The latest value is always there; a failure keeps the last good time.
+
+### Notices
+
+`notices(config)` opens the live stream (`/v1/sync`, a WebSocket over the same address; `ws` for a loopback `http`, `wss` otherwise, rustls with ring and the web roots). It signs in first with the session token, then tells the host: `Connected` (compare every zone now: changes made while disconnected are not replayed), `ZoneChanged { zone, token }`, `Resync`, `Disconnected`, `Rejected { code }`. A notice never carries record data; the host answers one with a pass. The library answers the server's pings as it reads; a connection that hears nothing for the idle timeout (two minutes) is dropped. The stream **reconnects by itself** with a delay that doubles from one second to one minute, with up to a fifth of jitter, and starts again from the first delay once the server says `Ready`. `Rejected { code: "unauthorized" }` stops it: the session is gone, so `reauthenticate` and open a new one. Dropping the handle closes the connection.
+
+### Not here yet
+
+The approval flow itself (digits, approve and deny, `remove_device`) and the device `app` label are the next change; the integration test does the approval over HTTP with the engine's own pairing calls until then. The account's protection chain is not signed by the client; the host's first protection setting follows the rules in [architecture.md](architecture.md).
+
+### Tests
+
+`orbyn-server/tests/device_client.rs` runs the client over a real loopback socket against the real server on Postgres: two devices, the zone key, a sealed record that the server holds only as ciphertext, a conflict merged both ways, the snapshot round trip, a pending device refused, offline work kept and sent later, and the notices stream hearing another device's change and being rejected when the session is revoked. `tests/notices.rs` serves the stream by hand to check the sign-in message, the pong, the reconnect and the stop.

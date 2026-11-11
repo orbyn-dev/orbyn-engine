@@ -4,6 +4,7 @@
 use crate::api::{DeviceApi, Method, Request, Response};
 use crate::clock::Clock;
 use crate::error::DeviceError;
+use crate::status::SyncStatus;
 use crate::store::{KeyStore, StoredIdentity, StoredSession};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -13,6 +14,7 @@ use orbyn_crypto::{DeviceKeys, DevicePublic};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::time::Duration;
+use tokio::sync::watch;
 use zeroize::Zeroizing;
 
 /// A session as the server answers it. The token is wiped when this is dropped.
@@ -102,6 +104,7 @@ pub struct DeviceClient<A, S, C> {
     pub(crate) store: S,
     pub(crate) clock: C,
     pub(crate) config: ClientConfig,
+    pub(crate) status: watch::Sender<SyncStatus>,
 }
 
 pub(crate) fn encode(bytes: &[u8]) -> String {
@@ -170,7 +173,13 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
             store,
             clock,
             config,
+            status: watch::Sender::new(SyncStatus::initial()),
         }
+    }
+
+    /// The transport, for a host that wraps it or reads from it.
+    pub fn api(&self) -> &A {
+        &self.api
     }
 
     /// The key store, for the host.
@@ -227,10 +236,11 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         parse(&response.body)
     }
 
-    /// An authenticated call with this device's session. A 401 asks the server whether the
-    /// account still exists: [`DeviceError::AccountGone`] if it was deleted, else
+    /// An authenticated call with this device's session, whatever the status: the caller reads
+    /// the answer. A 401 `unauthorized` is asked about: [`DeviceError::AccountGone`] only if
+    /// `POST /v1/accounts/status` answers 200 with a deletion time, else
     /// [`DeviceError::SessionExpired`].
-    pub(crate) async fn authed(
+    pub(crate) async fn authed_raw(
         &self,
         method: Method,
         path: &str,
@@ -241,11 +251,7 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         let response = self
             .call(method, path, Some(session.token.clone()), body)
             .await?;
-        if is_ok(&response) {
-            return Ok(response);
-        }
-        let error = failure(&response);
-        if error == DeviceError::SessionExpired {
+        if failure(&response) == DeviceError::SessionExpired {
             let status: Result<wire::AccountStatus, _> = self
                 .post(
                     "/v1/accounts/status",
@@ -257,8 +263,24 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
             if status.is_ok_and(|s| !s.deleted_at.is_empty()) {
                 return Err(DeviceError::AccountGone);
             }
+            return Err(DeviceError::SessionExpired);
         }
-        Err(error)
+        Ok(response)
+    }
+
+    /// An authenticated call that must answer 2xx.
+    pub(crate) async fn authed(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Zeroizing<Vec<u8>>>,
+    ) -> Result<Response, DeviceError> {
+        let response = self.authed_raw(method, path, body).await?;
+        if is_ok(&response) {
+            Ok(response)
+        } else {
+            Err(failure(&response))
+        }
     }
 
     // ---- sign-in ----

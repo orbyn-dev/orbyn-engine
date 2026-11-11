@@ -56,6 +56,12 @@ impl std::fmt::Debug for Response {
 /// One call to the engine. A failure to get any answer is [`DeviceError::Transport`].
 pub trait DeviceApi: Send + Sync {
     fn send(&self, request: Request) -> impl Future<Output = Result<Response, DeviceError>> + Send;
+
+    /// The engine's address, for the live notices stream (a WebSocket). A transport that is not a
+    /// network (a test double) has none, and then there is no notices stream.
+    fn base_url(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Whether `address` is a URL whose host is a loopback **IP literal** (`127.0.0.1`, `[::1]`).
@@ -127,6 +133,10 @@ impl HttpApi {
 }
 
 impl DeviceApi for HttpApi {
+    fn base_url(&self) -> Option<&str> {
+        Some(&self.base)
+    }
+
     async fn send(&self, request: Request) -> Result<Response, DeviceError> {
         let url = format!("{}{}", self.base, request.path);
         let mut builder = match request.method {
