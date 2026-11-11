@@ -4,8 +4,10 @@
 //!
 //! ```sh
 //! scripts/local.sh up
-//! cargo test -p orbyn-device-client --test local_stack -- --ignored
+//! ORBYN_LOCAL_STACK=1 cargo test -p orbyn-device-client --test local_stack -- --ignored
 //! ```
+//! The test is ignored **and** needs `ORBYN_LOCAL_STACK=1`: CI runs `--include-ignored` without a
+//! local stack, and there the test prints a note and passes without doing anything.
 //! `ORBYN_LOCAL_URL` changes the address (default `http://127.0.0.1:8080`).
 
 use orbyn_contracts::{DevicePlatform, DeviceState};
@@ -44,6 +46,10 @@ fn client(name: &str) -> DeviceClient<HttpApi, MemoryStore, SystemClock> {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the local stack: scripts/local.sh up"]
 async fn sign_up_second_device_re_login_and_sign_out_everywhere() {
+    if std::env::var("ORBYN_LOCAL_STACK").as_deref() != Ok("1") {
+        eprintln!("skipped: set ORBYN_LOCAL_STACK=1 with the local stack up (scripts/local.sh up)");
+        return;
+    }
     let password = Zeroizing::new("correct horse battery staple".to_owned());
     let email = format!("e2e-{}@example.test", uuid::Uuid::new_v4().simple());
     let invite = script(&["invite-code", "device-client"]);
