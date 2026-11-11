@@ -121,6 +121,22 @@ The label is the device's own signed claim, never proof of which app is running.
 
 The account's protection chain is not signed by the client; the host's first protection setting follows the rules in [architecture.md](architecture.md).
 
+## One crate to depend on
+
+The app may not depend on or name `orbyn-contracts` (rule D6). Every type of another Engine crate that this crate's public API exposes is therefore **re-exported from `orbyn-device-client`** (the same types, not copies), and `orbyn-client` re-exports the ones its own signatures use:
+
+| From | Re-exported by `orbyn-device-client` | Why |
+| --- | --- | --- |
+| `orbyn-contracts` | `DevicePlatform`, `DeviceApp`, `DeviceState`, `Device`, `DeviceList`, `DeviceRemoval`, `PendingApproval` | `ClientConfig`, `SessionInfo`, `devices()`, `pending_approval()` and what a device list holds |
+| `orbyn-client` | `Engine`, `Snapshot`, `Applied`, `RejectedFields`, `RefusedEnvelope`, `ClientError`, `Peer`, `Local`, `Quarantined`, `Trashed` | `open_engine`, `sync_all`, `SyncReport` and the engine's own return types |
+| `orbyn-sync` (through `orbyn-client`) | `Fields`, `Stamp` | staging and reading records |
+| `orbyn-crypto` (through `orbyn-client`) | `DeviceKeys`, `DevicePublic` | `StoredIdentity::keys()`, device keys |
+| `zeroize` | `Zeroizing` | `Password`, `StoredIdentity` |
+
+`orbyn-client` re-exports, besides those, the other contract types its `Engine` methods take or return (`ZoneList`, `UploadChanges`, `UploadResult`, `RemoveDevice`, `DeleteZone`, `KeyEnvelope`, `NewKeyEnvelope`, `KeyRotation`, `ApprovalNonce`, `CreateApproval`, `ConfirmApproval`, `ProtectionChain`, `ProtectionLink`, `ProtectionLevel`, `SetProtection`, `Record`, `RecordChanged`, `ZoneChanges`).
+
+Left out on purpose: the planner's `Item` and `ItemError` (planner only); the request and response bodies this crate sends and reads internally (`RegisterFinish`, `EmailVerify` and the like) and `orbyn-auth-client`, which no public signature uses; `ApproverPairing` and `DevicePairing`, which `ApproverApproval` and `JoinedApproval` wrap. `DeviceError` carries only strings, numbers and a duration. `tests/single_crate.rs` here and `orbyn-client/tests/reexports.rs` use these types through the one crate, and a check fails if the first names another Engine crate.
+
 ### Tests
 
 `orbyn-server/tests/device_client.rs` runs the client over a real loopback socket against the real server on Postgres: two devices, the zone key, a sealed record that the server holds only as ciphertext, a conflict merged both ways, the snapshot round trip, a pending device refused, the whole approval through the client API (digits compared, confirmed and finished), a deny from either side, wrong digits typed, a relabelled listing refused by the server's commitment check, a removal and the last device that stays, offline work kept and sent later, and the notices stream hearing another device's change and being rejected when the session is revoked. `tests/notices.rs` serves the stream by hand to check the sign-in message, the pong, the reconnect and the stop.

@@ -44,13 +44,26 @@ pub use service_key::{
 };
 pub use trust::{Peer, PinnedKeys, uuid_bytes};
 
+// Every type of another Engine crate that appears in this crate's public signatures or fields, so
+// a host that depends on this crate alone (the app may not name `orbyn-contracts`, rule D6) can
+// name it. They are the same types, not copies. Left out on purpose: the planner's `Item` and
+// `ItemError` (planner only), and the request and response bodies this crate never exposes.
+pub use orbyn_contracts::{
+    ApprovalNonce, ConfirmApproval, CreateApproval, DeleteZone, Device, DeviceApp, DeviceList,
+    DevicePlatform, KeyEnvelope, KeyRotation, NewKeyEnvelope, PendingApproval, ProtectionChain,
+    ProtectionLevel, ProtectionLink, Record, RecordChanged, RemoveDevice, SetProtection,
+    UploadChanges, UploadResult, ZoneChanges, ZoneList,
+};
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use crypt::Place;
 use orbyn_auth_client as auth;
 use orbyn_contracts as wire;
-use orbyn_crypto::{CryptoError, DeviceKeys, DevicePublic, SymmetricKey};
-use orbyn_sync::{Clock, Fields, Stamp, merge, merge_remote};
+use orbyn_crypto::{CryptoError, SymmetricKey};
+pub use orbyn_crypto::{DeviceKeys, DevicePublic};
+use orbyn_sync::{Clock, merge, merge_remote};
+pub use orbyn_sync::{Fields, Stamp};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use trust::Trust;
