@@ -105,6 +105,7 @@ impl Server {
             ClientConfig {
                 device_name: name.to_owned(),
                 platform: wire::DevicePlatform::Linux,
+                app: Some(wire::DeviceApp::Engineering),
             },
         )
     }
@@ -527,6 +528,7 @@ async fn a_failed_network_keeps_the_work_and_says_offline() {
         ClientConfig {
             device_name: "Laptop".to_owned(),
             platform: wire::DevicePlatform::Linux,
+            app: Some(wire::DeviceApp::Engineering),
         },
     );
     lost.store()
@@ -706,6 +708,7 @@ async fn a_conflict_during_an_upload_is_merged_and_the_upload_goes_again() {
         ClientConfig {
             device_name: "Laptop".to_owned(),
             platform: wire::DevicePlatform::Linux,
+            app: Some(wire::DeviceApp::Engineering),
         },
     );
     racing

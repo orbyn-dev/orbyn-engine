@@ -1,6 +1,6 @@
 //! Device lists, removals and approval wire types.
 
-use super::{DevicePlatform, DeviceState};
+use super::{DeviceApp, DevicePlatform, DeviceState};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -11,6 +11,10 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub platform: DevicePlatform,
+    /// The app the device signed itself in as, if it said (see [`DeviceApp`]).
+    #[serde(default)]
+    #[ts(optional)]
+    pub app: Option<DeviceApp>,
     pub state: DeviceState,
     pub signing_key: String,
     pub agreement_key: String,

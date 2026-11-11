@@ -16,7 +16,7 @@ It ships in three pull requests:
 | Secrets | `KeyStore` | `load`, `save`, `clear` of one `StoredIdentity`. The OS keychain in the app; `MemoryStore` in tests. |
 | Time | `Clock` | Unix seconds, so a test fixes the time a trusted start is signed at. `SystemClock` is the real one. |
 
-`DeviceClient<A, S, C>` holds the three and a `ClientConfig` (the device's name and platform).
+`DeviceClient<A, S, C>` holds the three and a `ClientConfig` (the device's name, platform and optional `app` label). With an `app`, the sign-up and sign-in signatures are the v2 messages, which cover the trimmed name, the platform and the app; the client sends the trimmed name so the server verifies the same bytes. Without one it signs the v1 messages.
 
 ### What the key store holds, and what it does not
 

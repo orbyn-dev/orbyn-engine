@@ -49,6 +49,10 @@ pub struct ClientConfig {
     /// A name the person chose for this device, 1 to 100 characters.
     pub device_name: String,
     pub platform: wire::DevicePlatform,
+    /// Which Orbyn app this is. When set, the sign-up and sign-in signatures cover the trimmed
+    /// name, the platform and this label (`orbyn/device-register/v2`, `orbyn/device-login/v2`), so
+    /// the server and the device list can trust it; when `None` the earlier messages are signed.
+    pub app: Option<wire::DeviceApp>,
 }
 
 /// What a sign-up needs.
@@ -197,10 +201,58 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
 
     pub(crate) fn new_device(&self, keys: &DevicePublic) -> wire::NewDevice {
         wire::NewDevice {
-            name: self.config.device_name.clone(),
+            name: self.config.device_name.trim().to_owned(),
             platform: self.config.platform,
+            app: self.config.app,
             signing_key: encode(&keys.signing),
             agreement_key: encode(&keys.agreement),
+        }
+    }
+
+    /// The context and bytes this device signs to introduce itself at sign-up.
+    pub(crate) fn register_message(
+        &self,
+        email: &str,
+        upload: &[u8],
+        keys: &DevicePublic,
+    ) -> (&'static str, Vec<u8>) {
+        let name = self.config.device_name.trim();
+        match self.config.app {
+            Some(app) => (
+                auth::DEVICE_REGISTER_V2_CONTEXT,
+                auth::register_message_v2(email, upload, keys, &self.descriptor(name, app)),
+            ),
+            None => (
+                auth::DEVICE_REGISTER_CONTEXT,
+                auth::register_message(email, upload, keys),
+            ),
+        }
+    }
+
+    /// As [`Self::register_message`], for a sign-in.
+    pub(crate) fn login_message(
+        &self,
+        login_id: &[u8; 16],
+        keys: &DevicePublic,
+    ) -> (&'static str, Vec<u8>) {
+        let name = self.config.device_name.trim();
+        match self.config.app {
+            Some(app) => (
+                auth::DEVICE_LOGIN_V2_CONTEXT,
+                auth::login_message_v2(login_id, keys, &self.descriptor(name, app)),
+            ),
+            None => (
+                auth::DEVICE_LOGIN_CONTEXT,
+                auth::login_message(login_id, keys),
+            ),
+        }
+    }
+
+    fn descriptor<'a>(&self, name: &'a str, app: wire::DeviceApp) -> auth::Descriptor<'a> {
+        auth::Descriptor {
+            name,
+            platform: self.config.platform.as_str(),
+            app: app.as_str(),
         }
     }
 
@@ -358,10 +410,8 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         let login_id: [u8; 16] = *uuid::Uuid::parse_str(&started.login_id)
             .map_err(|_| protocol())?
             .as_bytes();
-        let signature = keys.sign(
-            auth::DEVICE_LOGIN_CONTEXT,
-            &auth::login_message(&login_id, &public),
-        );
+        let (context, message) = self.login_message(&login_id, &public);
+        let signature = keys.sign(context, &message);
         let response = self
             .call(
                 Method::Post,

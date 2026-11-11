@@ -11,8 +11,8 @@
 
 use super::totp::{self, RECOVERY_CODES, SECRET_LEN};
 use super::{
-    AccountError, Accounts, AuditAction, Client, LOGIN_STATE_TTL, NewDevice, NewSession, Platform,
-    Result, Session, limits, public_keys,
+    AccountError, Accounts, App, AuditAction, Client, LOGIN_STATE_TTL, NewDevice, NewSession,
+    Platform, Result, Session, limits, public_keys,
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -125,6 +125,7 @@ impl Accounts {
         let body = serde_json::json!({
             "name": name,
             "platform": device.platform.as_str(),
+            "app": device.app.map(App::as_str),
             "signing": URL_SAFE_NO_PAD.encode(device.keys.signing),
             "agreement": URL_SAFE_NO_PAD.encode(device.keys.agreement),
         });
@@ -181,6 +182,7 @@ impl Accounts {
         let device = NewDevice {
             name: name.clone(),
             platform: Platform::parse(body["platform"].as_str().ok_or(AccountError::Internal)?)?,
+            app: App::parse_opt(body["app"].as_str())?,
             keys: public_keys(&field("signing")?, &field("agreement")?)?,
         };
         Ok((device, name))

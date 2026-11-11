@@ -16,6 +16,42 @@ pub enum DevicePlatform {
     Linux,
 }
 
+impl DevicePlatform {
+    /// The wire name, as signed into a v2 device message.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Ios => "ios",
+            Self::Android => "android",
+            Self::Macos => "macos",
+            Self::Windows => "windows",
+            Self::Linux => "linux",
+        }
+    }
+}
+
+/// Which Orbyn app a device is. It is **signed into the device's register and login messages**
+/// (`orbyn/device-register/v2` and `orbyn/device-login/v2`, with the device's name and platform),
+/// so the server checks the device itself claimed it, and the device list shows it. A device that
+/// sends no label signs the earlier messages and has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum DeviceApp {
+    Planner,
+    Engineering,
+}
+
+impl DeviceApp {
+    /// The wire name, as signed into a v2 device message.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planner => "planner",
+            Self::Engineering => "engineering",
+        }
+    }
+}
+
 /// Whether a device may use the account. A device that signs in is `pending`
 /// until a trusted device approves it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -37,6 +73,12 @@ pub struct NewDevice {
     pub signing_key: String,
     /// The X25519 public key (32 bytes).
     pub agreement_key: String,
+    /// The app this device is, when it says. With a label the device's signature covers its
+    /// trimmed name, its platform and the label (`orbyn/device-register/v2`,
+    /// `orbyn/device-login/v2`); without one it signs the v1 messages, as before.
+    #[serde(default)]
+    #[ts(optional)]
+    pub app: Option<DeviceApp>,
 }
 
 /// `POST /v1/accounts/register/start`. Byte fields are base64url without padding.

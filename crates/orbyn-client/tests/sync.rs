@@ -57,6 +57,7 @@ fn entry(id: &str, keys: &DeviceKeys, state: wire::DeviceState) -> wire::Device 
         id: id.into(),
         name: id.into(),
         platform: wire::DevicePlatform::Web,
+        app: None,
         state,
         signing_key: b64(&public.signing),
         agreement_key: b64(&public.agreement),

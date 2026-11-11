@@ -34,6 +34,7 @@ async fn client_for(address: &str) -> DeviceClient<HttpApi, MemoryStore, SystemC
         ClientConfig {
             device_name: "Laptop".to_owned(),
             platform: DevicePlatform::Linux,
+            app: None,
         },
     )
 }
@@ -275,6 +276,7 @@ async fn a_transport_that_reports_a_plain_text_address_off_loopback_gets_no_stre
         ClientConfig {
             device_name: "x".to_owned(),
             platform: DevicePlatform::Linux,
+            app: None,
         },
     );
     assert!(matches!(

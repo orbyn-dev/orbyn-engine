@@ -185,13 +185,9 @@ impl Accounts {
                 return Err(AccountError::LoginFailed);
             }
         };
-        orbyn_crypto::verify(
-            &device.keys,
-            DEVICE_LOGIN_CONTEXT,
-            &login_message(login_id.as_bytes(), &device.keys),
-            signature,
-        )
-        .map_err(|_| AccountError::InvalidSignature)?;
+        let (context, message) = device.login_proof(&name, login_id.as_bytes());
+        orbyn_crypto::verify(&device.keys, context, &message, signature)
+            .map_err(|_| AccountError::InvalidSignature)?;
 
         // The password was right. An account with a second factor gets no session and no device
         // row yet, unless a trusted device proved itself at the start: that device holds a device
@@ -275,13 +271,14 @@ impl Accounts {
                 }
                 let id = Uuid::new_v4();
                 sqlx::query(
-                    "INSERT INTO devices (id, account_id, name, platform, signing_key, agreement_key, state)
-                     VALUES ($1, $2, $3, $4, $5, $6, 'pending')",
+                    "INSERT INTO devices (id, account_id, name, platform, app, signing_key, agreement_key, state)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')",
                 )
                 .bind(id)
                 .bind(account_id)
                 .bind(name)
                 .bind(device.platform.as_str())
+                .bind(device.app.map(App::as_str))
                 .bind(device.keys.signing.as_slice())
                 .bind(device.keys.agreement.as_slice())
                 .execute(&mut *tx)

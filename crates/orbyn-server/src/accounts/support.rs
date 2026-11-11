@@ -285,6 +285,20 @@ pub(super) fn wire_platform(p: accounts::Platform) -> wire::DevicePlatform {
     }
 }
 
+pub(super) fn app(a: wire::DeviceApp) -> accounts::App {
+    match a {
+        wire::DeviceApp::Planner => accounts::App::Planner,
+        wire::DeviceApp::Engineering => accounts::App::Engineering,
+    }
+}
+
+pub(super) fn wire_app(a: accounts::App) -> wire::DeviceApp {
+    match a {
+        accounts::App::Planner => wire::DeviceApp::Planner,
+        accounts::App::Engineering => wire::DeviceApp::Engineering,
+    }
+}
+
 pub(super) fn wire_state(s: accounts::DeviceState) -> wire::DeviceState {
     match s {
         accounts::DeviceState::Pending => wire::DeviceState::Pending,
@@ -296,6 +310,7 @@ pub(super) fn new_device(device: &wire::NewDevice) -> Answer<accounts::NewDevice
     Ok(accounts::NewDevice {
         name: device.name.clone(),
         platform: platform(device.platform),
+        app: device.app.map(app),
         keys: DevicePublic {
             signing: fixed(&device.signing_key)?,
             agreement: fixed(&device.agreement_key)?,
@@ -308,6 +323,7 @@ pub(super) fn wire_device(device: accounts::Device, current: Uuid) -> wire::Devi
         id: device.id.to_string(),
         name: device.name,
         platform: wire_platform(device.platform),
+        app: device.app.map(wire_app),
         state: wire_state(device.state),
         signing_key: encode(&device.keys.signing),
         agreement_key: encode(&device.keys.agreement),
