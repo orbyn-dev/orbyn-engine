@@ -53,6 +53,7 @@ fn rule(value: &Value) -> Rule {
 }
 
 fn apply(settings: &mut Settings, op: &Value, device: u64) {
+    let before = settings.fields().clone();
     let at = stamp(op, device);
     let list = |op: &Value, name: &str| -> (String, String) {
         let pair = op[name].as_array().expect(name);
@@ -107,11 +108,22 @@ fn apply(settings: &mut Settings, op: &Value, device: u64) {
         panic!("an op this runner does not know: {op}");
     };
     match op.get("error") {
-        Some(expected) => assert_eq!(
-            result.map_err(error_name),
-            Err(expected.as_str().expect("name")),
-            "{op}"
-        ),
+        Some(expected) => {
+            assert_eq!(
+                result.map_err(error_name),
+                Err(expected.as_str().expect("name")),
+                "{op}"
+            );
+            // A single refused write changes nothing (a fill or a churn is many writes, and the
+            // ones before the refusal stay).
+            if op.get("fill").is_none() && op.get("churn").is_none() {
+                assert_eq!(
+                    settings.fields(),
+                    &before,
+                    "a refused write changes nothing: {op}"
+                );
+            }
+        }
         None => assert_eq!(result, Ok(()), "{op}"),
     }
 }

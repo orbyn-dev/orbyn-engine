@@ -16,9 +16,12 @@ pub const RESERVED: [&str; 4] = [
     "keybindings",
 ];
 
-/// Settings that never leave the device. They hold paths, provider connections, secrets or
-/// things that only make sense on one machine, so the crate refuses them in both directions.
-pub const NOT_SYNCED: [&str; 15] = [
+/// Settings that never leave the device. Some hold paths, provider connections or secrets, or only
+/// make sense on one machine. The last four (`default_permission_mode`, `default_project_scripts`,
+/// `enable_agent_browser_access`, `enable_agent_device_access`) widen what agents may do or run
+/// commands: a peer must not be able to loosen another machine, so each is chosen on that
+/// machine. The crate refuses all of them in both directions.
+pub const NOT_SYNCED: [&str; 19] = [
     "environment_icon",
     "keep_awake_during_runs",
     "background_activity_profile",
@@ -34,6 +37,10 @@ pub const NOT_SYNCED: [&str; 15] = [
     "prefer_saved_login",
     "disabled_engines",
     "default_theme_set_at",
+    "default_permission_mode",
+    "default_project_scripts",
+    "enable_agent_browser_access",
+    "enable_agent_device_access",
 ];
 
 /// What a plain field holds.
@@ -115,11 +122,6 @@ pub const SPECS: &[Spec] = &[
         "response_streaming_mode",
         Kind::Enum(&["paragraph", "turn"]),
         Initial::Text("paragraph")
-    ),
-    spec!(
-        "default_permission_mode",
-        Kind::Enum(&["supervised", "auto_edits", "auto", "full_access"]),
-        Initial::Text("supervised")
     ),
     spec!(
         "default_thread_env_mode",
