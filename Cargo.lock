@@ -1876,6 +1876,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbyn-engineering"
+version = "0.1.0"
+dependencies = [
+ "orbyn-sync",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
 name = "orbyn-keyservice"
 version = "0.1.0"
 dependencies = [
