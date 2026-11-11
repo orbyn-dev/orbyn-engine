@@ -96,6 +96,27 @@ fn view_of(
     }
 }
 
+/// The new device joins with the description it signed in with when it named its app.
+fn join(new: &Device, view: &wire::PendingApproval) -> (DevicePairing, wire::ApprovalNonce) {
+    match new.entry.app {
+        Some(app) => {
+            new.engine
+                .join_approval_labelled(view, NOW_S, &new.entry.name, new.entry.platform, app)
+        }
+        None => new.engine.join_approval(view, NOW_S),
+    }
+    .expect("join")
+}
+
+/// A change a lying server makes to how it lists a device.
+type Change<'a> = &'a dyn Fn(&mut wire::Device);
+
+/// A pending device that named its app at sign-in.
+fn labelled(mut device: Device) -> Device {
+    device.entry.app = Some(wire::DeviceApp::Engineering);
+    device
+}
+
 /// The whole two-way approval of `new` by `approver`, relayed by an honest
 /// server, with the person confirming on both screens. `list` is what the
 /// approver sees. Sets and returns `new`'s entry.
@@ -105,7 +126,7 @@ fn approve(approver: &mut Device, new: &mut Device, list: &wire::DeviceList) -> 
         .start_approval(&new.entry, NOW_S)
         .expect("start");
     let mut view = view_of(&create, approver, new);
-    let (pd, nonce) = new.engine.join_approval(&view, NOW_S).expect("join");
+    let (pd, nonce) = join(new, &view);
     view.device_nonce = Some(nonce.nonce);
     let reveal = pa.reveal(&view).expect("reveal");
     view.approver_nonce = Some(reveal.nonce);
@@ -355,6 +376,7 @@ fn forged(device: &Device, approver: &str, signer: &DeviceKeys) -> wire::Device 
         approver: &signer.public(),
         device_id: &uuid_bytes(&device.id).expect("uuid"),
         device: &device.keys.public(),
+        descriptor: None,
     });
     e.approved_by = Some(approver.into());
     e.approval_signature = Some(b64(&signer.sign(auth::DEVICE_APPROVAL_CONTEXT, &message)));
@@ -594,7 +616,7 @@ fn confirmed(
         .start_approval(&new.entry, NOW_S)
         .expect("start");
     let mut view = view_of(&create, approver, new);
-    let (pd, nonce) = new.engine.join_approval(&view, NOW_S).expect("join");
+    let (pd, nonce) = join(new, &view);
     view.device_nonce = Some(nonce.nonce);
     view.approver_nonce = Some(pa.reveal(&view).expect("reveal").nonce);
     let sas = pd.sas(&view).expect("sas");
@@ -664,6 +686,7 @@ fn an_approval_signature_the_approver_did_not_make_is_refused() {
         approver: &a.keys.public(),
         device_id: &uuid_bytes(C).expect("uuid"),
         device: &c.keys.public(),
+        descriptor: None,
     });
     view.signature = Some(b64(&evil.sign(auth::DEVICE_APPROVAL_CONTEXT, &message)));
     assert!(
@@ -2416,6 +2439,7 @@ fn a_format_2_endorsement_under_a_v1_approval_is_still_accepted_and_says_no_sett
         approver: &a2.keys.public(),
         device_id: &uuid_bytes(&d.id).expect("uuid"),
         device: &d.keys.public(),
+        descriptor: None,
     });
     view.signature = Some(b64(&a2
         .keys
@@ -2526,6 +2550,7 @@ fn a_format_3_endorsement_under_a_v1_approval_signature_is_refused() {
         approver: &a.keys.public(),
         device_id: &uuid_bytes(&c.id).expect("uuid"),
         device: &c.keys.public(),
+        descriptor: None,
     });
     view.signature = Some(b64(&a
         .keys
@@ -2773,4 +2798,139 @@ fn an_old_link_replayed_as_the_successor_is_refused() {
         a.engine.protection_level(),
         State::Verified(Level::Advanced)
     );
+}
+
+// ---- A device that named its app is approved under the v3 message ------------------------------
+
+/// A and B trusted, and C that named its app approved by A. Returns B (who has not looked at
+/// C's approval yet, so it has pinned nothing about it) and the list the server shows.
+fn labelled_c_approved() -> (Device, wire::DeviceList) {
+    let mut store = FakeStore::new(10);
+    let (mut a, b, _) = pair(&mut store);
+    let mut c = labelled(Device::new(C, a.now));
+    let before = list(&[&a, &b, &c]);
+    approve(&mut a, &mut c, &before);
+    let all = list(&[&a, &b, &c]);
+    (b, all)
+}
+
+#[test]
+fn a_device_that_named_its_app_is_approved_and_verified_under_its_description() {
+    let (mut b, all) = labelled_c_approved();
+    assert_eq!(
+        trusted_ids(&mut b, &all),
+        [A, B, C],
+        "b verifies c under v3"
+    );
+
+    // Any change to what was approved fails the signature, for a verifier that has not pinned c
+    // already; each case starts from a fresh verifier.
+    let changes: [(&str, Change); 4] = [
+        ("name", &|d| d.name = "Other".into()),
+        ("platform", &|d| d.platform = wire::DevicePlatform::Ios),
+        ("app", &|d| d.app = Some(wire::DeviceApp::Planner)),
+        // Dropping the label must not fall back to an older message.
+        ("label dropped", &|d| d.app = None),
+    ];
+    for (what, change) in changes {
+        let (mut b, mut devices) = labelled_c_approved();
+        let entry = devices.devices.iter_mut().find(|d| d.id == C).expect("c");
+        change(entry);
+        let ids = trusted_ids(&mut b, &devices);
+        assert!(!ids.contains(&C.to_owned()), "{what}: {ids:?}");
+    }
+}
+
+#[test]
+fn the_digits_do_not_match_when_the_approver_was_shown_another_description() {
+    let mut store = FakeStore::new(10);
+    let (a, _b, _) = pair(&mut store);
+    let c = labelled(Device::new(C, a.now));
+    let shown_changes: [Change; 4] = [
+        &|d| d.name = "Other".into(),
+        &|d| d.platform = wire::DevicePlatform::Ios,
+        &|d| d.app = Some(wire::DeviceApp::Planner),
+        &|d| d.app = None,
+    ];
+    for change in shown_changes {
+        // The server lists c to the approver with a changed description.
+        let mut shown = c.entry.clone();
+        change(&mut shown);
+        let (mut pa, create) = a.engine.start_approval(&shown, NOW_S).expect("start");
+        let mut view = view_of(&create, &a, &c);
+        let (pd, nonce) = join(&c, &view);
+        view.device_nonce = Some(nonce.nonce);
+        view.approver_nonce = Some(pa.reveal(&view).expect("reveal").nonce);
+        // c holds the commitment made over another description: it refuses to show digits.
+        assert!(pd.sas(&view).is_err());
+    }
+}
+
+#[test]
+fn a_labelled_device_refuses_an_approval_that_does_not_cover_its_description() {
+    // The approver's own key signs an older message that leaves the description out.
+    for older in [
+        auth::DEVICE_APPROVAL_V2_CONTEXT,
+        auth::DEVICE_APPROVAL_CONTEXT,
+    ] {
+        let mut store = FakeStore::new(10);
+        let (mut a, _b, _) = pair(&mut store);
+        let mut c = labelled(Device::new(C, a.now));
+        let devices = list(&[&a, &c]);
+        let (pd, mut view, sas) = confirmed(&mut a, &c, &devices);
+        let hash =
+            auth::endorsement_hash(&unb64(view.endorsement.as_deref().expect("endorsement")));
+        let public = (a.keys.public(), c.keys.public());
+        let pairing = auth::Pairing {
+            account_id: &uuid_bytes(ACCOUNT).expect("uuid"),
+            approval_id: &uuid_bytes(&view.id).expect("uuid"),
+            created_at: view.created_at,
+            approver_id: &uuid_bytes(A).expect("uuid"),
+            approver: &public.0,
+            device_id: &uuid_bytes(C).expect("uuid"),
+            device: &public.1,
+            descriptor: None,
+        };
+        let message = if older == auth::DEVICE_APPROVAL_V2_CONTEXT {
+            auth::approval_message_v2(&pairing, &hash)
+        } else {
+            auth::approval_message(&pairing)
+        };
+        view.signature = Some(b64(&a.keys.sign(older, &message)));
+        if older == auth::DEVICE_APPROVAL_CONTEXT {
+            // The v1 message needs no endorsement: without one, nothing else would refuse it.
+            view.endorsement = None;
+        }
+        assert!(
+            c.engine
+                .finish_approval(pd, &view, Some(&sas), NOW_S + 30)
+                .is_err(),
+            "{older}"
+        );
+        assert_eq!(pins(&c).len(), 1, "c trusts only itself");
+    }
+}
+
+#[test]
+fn the_description_is_trimmed_as_the_server_stores_it() {
+    let mut store = FakeStore::new(10);
+    let (a, _b, _) = pair(&mut store);
+    let mut c = labelled(Device::new(C, a.now));
+    c.entry.name = "Phone".into();
+    let (mut pa, create) = a.engine.start_approval(&c.entry, NOW_S).expect("start");
+    let mut view = view_of(&create, &a, &c);
+    // The host passes the name as the person typed it; the server stored it trimmed.
+    let (pd, nonce) = c
+        .engine
+        .join_approval_labelled(
+            &view,
+            NOW_S,
+            "  Phone  ",
+            c.entry.platform,
+            wire::DeviceApp::Engineering,
+        )
+        .expect("join");
+    view.device_nonce = Some(nonce.nonce);
+    view.approver_nonce = Some(pa.reveal(&view).expect("reveal").nonce);
+    assert_eq!(pd.sas(&view).ok(), pa.sas());
 }

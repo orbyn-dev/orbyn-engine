@@ -51,6 +51,8 @@ pub const DEVICE_LOGIN_V2_CONTEXT: &str = "orbyn/device-login/v2";
 pub const DEVICE_APPROVAL_CONTEXT: &str = "orbyn/device-approval/v1";
 /// See [`approval_message_v2`].
 pub const DEVICE_APPROVAL_V2_CONTEXT: &str = "orbyn/device-approval/v2";
+/// What an approver signs for a device that named its app: [`approval_message_v3`].
+pub const DEVICE_APPROVAL_V3_CONTEXT: &str = "orbyn/device-approval/v3";
 /// What an approver signs since endorsements carry a protection setting: [`approval_message_v2`],
 /// the approval message plus the hash of the endorsement, so the endorsement cannot be removed or
 /// swapped without breaking the approval signature. Approvals made before it are still read under
@@ -411,11 +413,23 @@ pub struct Pairing<'a> {
     pub approver: &'a DevicePublic,
     pub device_id: &'a [u8; 16],
     pub device: &'a DevicePublic,
+    /// What the new device says it is (name, platform, app), when it named its app at sign-in.
+    /// The commitment, the digits and the v3 approval message then cover it, so the person who
+    /// approves is shown the device that signed in and a server cannot relabel it. It is the
+    /// device's own signed claim: it says what the device asserted, never which app is running.
+    pub descriptor: Option<Descriptor<'a>>,
 }
 
-fn pairing_bytes(context: &str, p: &Pairing<'_>) -> Vec<u8> {
+/// `with_descriptor` adds the device's [`Descriptor`] under a context of its own, so a described
+/// pairing and an undescribed one never share bytes.
+fn pairing_bytes(context: &str, p: &Pairing<'_>, with_descriptor: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + context.len() + 16 * 4 + 8 + 128);
-    push_len_prefixed(&mut out, context.as_bytes());
+    match (with_descriptor, &p.descriptor) {
+        (true, Some(_)) => {
+            push_len_prefixed(&mut out, format!("{context}/described").as_bytes());
+        }
+        _ => push_len_prefixed(&mut out, context.as_bytes()),
+    }
     out.extend_from_slice(p.account_id);
     out.extend_from_slice(p.approval_id);
     out.extend_from_slice(&p.created_at.to_be_bytes());
@@ -423,6 +437,9 @@ fn pairing_bytes(context: &str, p: &Pairing<'_>) -> Vec<u8> {
     push_device(&mut out, p.approver);
     out.extend_from_slice(p.device_id);
     push_device(&mut out, p.device);
+    if let (true, Some(descriptor)) = (with_descriptor, &p.descriptor) {
+        push_descriptor(&mut out, descriptor);
+    }
     out
 }
 
@@ -434,7 +451,7 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 /// What the approver publishes first: a hash of its 32-byte nonce bound to the
 /// whole approval, so it cannot pick the nonce after seeing the new device's.
 pub fn approval_commitment(pairing: &Pairing<'_>, approver_nonce: &[u8; 32]) -> [u8; 32] {
-    let mut bytes = pairing_bytes(APPROVAL_COMMIT_CONTEXT, pairing);
+    let mut bytes = pairing_bytes(APPROVAL_COMMIT_CONTEXT, pairing, true);
     bytes.extend_from_slice(approver_nonce);
     sha256(&bytes)
 }
@@ -448,7 +465,7 @@ pub fn approval_sas(
     approver_nonce: &[u8; 32],
     device_nonce: &[u8; 32],
 ) -> String {
-    let mut bytes = pairing_bytes(APPROVAL_SAS_CONTEXT, pairing);
+    let mut bytes = pairing_bytes(APPROVAL_SAS_CONTEXT, pairing, true);
     bytes.extend_from_slice(approver_nonce);
     bytes.extend_from_slice(device_nonce);
     let digest = sha256(&bytes);
@@ -462,16 +479,27 @@ pub fn approval_sas(
 /// confirmed on it that both screens show the same digits. Other devices check
 /// it when they verify the new device by its approval chain.
 pub fn approval_message(pairing: &Pairing<'_>) -> Vec<u8> {
-    pairing_bytes(DEVICE_APPROVAL_CONTEXT, pairing)
+    pairing_bytes(DEVICE_APPROVAL_CONTEXT, pairing, false)
 }
 
 /// What the approver signs under [`DEVICE_APPROVAL_V2_CONTEXT`]: the approval, and the SHA-256 of
 /// the endorsement it attaches, so a server cannot drop the endorsement or put another in its
 /// place. `endorsement_hash` is [`endorsement_hash`] of the endorsement bytes as sent.
 pub fn approval_message_v2(pairing: &Pairing<'_>, endorsement_hash: &[u8; 32]) -> Vec<u8> {
-    let mut out = pairing_bytes(DEVICE_APPROVAL_V2_CONTEXT, pairing);
+    let mut out = pairing_bytes(DEVICE_APPROVAL_V2_CONTEXT, pairing, false);
     out.extend_from_slice(endorsement_hash);
     out
+}
+
+/// What the approver signs under [`DEVICE_APPROVAL_V3_CONTEXT`] for a device that named its app:
+/// the v2 message with the device's name, platform and app, so what the approver was shown is what
+/// every verifier checks. `None` when the pairing has no descriptor: a device without a label is
+/// approved under v2 or v1.
+pub fn approval_message_v3(pairing: &Pairing<'_>, endorsement_hash: &[u8; 32]) -> Option<Vec<u8>> {
+    pairing.descriptor?;
+    let mut out = pairing_bytes(DEVICE_APPROVAL_V3_CONTEXT, pairing, true);
+    out.extend_from_slice(endorsement_hash);
+    Some(out)
 }
 
 /// The hash of an endorsement that [`approval_message_v2`] covers.
@@ -556,6 +584,7 @@ mod tests {
                 approver,
                 device_id: &[2; 16],
                 device,
+                descriptor: None,
             })
         };
         let base = pairing(&[0; 16], &a, &b, 1);
@@ -610,6 +639,7 @@ mod pairing_tests {
                         approver,
                         device_id: &[2; 16],
                         device,
+                        descriptor: None,
                     },
                     &[ra; 32],
                     &[rd; 32],
@@ -641,6 +671,7 @@ mod pairing_tests {
             approver: &a,
             device_id: &[2; 16],
             device: &d,
+            descriptor: None,
         };
         let c = approval_commitment(&pairing, &[4; 32]);
         assert_ne!(c, approval_commitment(&pairing, &[5; 32]));
@@ -768,6 +799,7 @@ mod protection_tests {
             approver: &keys,
             device_id: &device,
             device: &keys,
+            descriptor: None,
         };
         let a = approval_message_v2(&pairing, &endorsement_hash(b"one"));
         let b = approval_message_v2(&pairing, &endorsement_hash(b"two"));
@@ -858,5 +890,138 @@ mod descriptor_tests {
         assert!(orbyn_crypto::verify(&keys, DEVICE_REGISTER_CONTEXT, &v2, &signed_v2).is_err());
         assert!(orbyn_crypto::verify(&keys, DEVICE_REGISTER_CONTEXT, &v1, &signed_v2).is_err());
         assert!(orbyn_crypto::verify(&keys, DEVICE_REGISTER_V2_CONTEXT, &v2, &signed_v1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod described_pairing_tests {
+    use super::*;
+
+    fn keys(seed: u8) -> DevicePublic {
+        DevicePublic {
+            signing: [seed; 32],
+            agreement: [seed + 1; 32],
+        }
+    }
+
+    fn pairing<'a>(
+        approver: &'a DevicePublic,
+        device: &'a DevicePublic,
+        ids: &'a [[u8; 16]; 4],
+        descriptor: Option<Descriptor<'a>>,
+    ) -> Pairing<'a> {
+        Pairing {
+            account_id: &ids[0],
+            approval_id: &ids[1],
+            created_at: 1_700_000_000,
+            approver_id: &ids[2],
+            approver,
+            device_id: &ids[3],
+            device,
+            descriptor,
+        }
+    }
+
+    const D: Descriptor<'static> = Descriptor {
+        name: "Phone",
+        platform: "android",
+        app: "engineering",
+    };
+
+    #[test]
+    fn a_descriptor_changes_the_commitment_the_digits_and_nothing_else_for_old_messages() {
+        let (a, d) = (keys(1), keys(9));
+        let ids = [[1; 16], [2; 16], [3; 16], [4; 16]];
+        let plain = pairing(&a, &d, &ids, None);
+        let described = pairing(&a, &d, &ids, Some(D));
+        let (ra, rd) = ([5; 32], [6; 32]);
+        assert_ne!(
+            approval_commitment(&plain, &ra),
+            approval_commitment(&described, &ra)
+        );
+        assert_ne!(
+            approval_sas(&plain, &ra, &rd),
+            approval_sas(&described, &ra, &rd)
+        );
+        // The v1 and v2 messages never covered it.
+        assert_eq!(approval_message(&plain), approval_message(&described));
+        let h = endorsement_hash(b"e");
+        assert_eq!(
+            approval_message_v2(&plain, &h),
+            approval_message_v2(&described, &h)
+        );
+    }
+
+    #[test]
+    fn each_field_of_the_descriptor_changes_the_commitment_the_digits_and_the_v3_message() {
+        let (a, d) = (keys(1), keys(9));
+        let ids = [[1; 16], [2; 16], [3; 16], [4; 16]];
+        let base = pairing(&a, &d, &ids, Some(D));
+        let others = [
+            Descriptor {
+                name: "Tablet",
+                ..D
+            },
+            Descriptor {
+                platform: "ios",
+                ..D
+            },
+            Descriptor {
+                app: "planner",
+                ..D
+            },
+        ];
+        let (ra, rd) = ([5; 32], [6; 32]);
+        let h = endorsement_hash(b"e");
+        for other in others {
+            let changed = pairing(&a, &d, &ids, Some(other));
+            assert_ne!(
+                approval_commitment(&base, &ra),
+                approval_commitment(&changed, &ra)
+            );
+            assert_ne!(
+                approval_sas(&base, &ra, &rd),
+                approval_sas(&changed, &ra, &rd)
+            );
+            assert_ne!(
+                approval_message_v3(&base, &h),
+                approval_message_v3(&changed, &h)
+            );
+        }
+    }
+
+    #[test]
+    fn a_described_pairing_has_its_own_context_in_the_bytes() {
+        let (a, d) = (keys(1), keys(9));
+        let ids = [[1; 16], [2; 16], [3; 16], [4; 16]];
+        let prefixed = |text: &str| {
+            let mut out = Vec::new();
+            push_len_prefixed(&mut out, text.as_bytes());
+            out
+        };
+        let plain = pairing_bytes("ctx", &pairing(&a, &d, &ids, None), true);
+        assert!(plain.starts_with(&prefixed("ctx")));
+        let described = pairing_bytes("ctx", &pairing(&a, &d, &ids, Some(D)), true);
+        assert!(described.starts_with(&prefixed("ctx/described")));
+        // Asked for without a description, the context is the plain one.
+        let skipped = pairing_bytes("ctx", &pairing(&a, &d, &ids, Some(D)), false);
+        assert!(skipped.starts_with(&prefixed("ctx")));
+    }
+
+    #[test]
+    fn the_v3_message_needs_a_descriptor_and_has_its_own_context_and_bytes() {
+        let (a, d) = (keys(1), keys(9));
+        let ids = [[1; 16], [2; 16], [3; 16], [4; 16]];
+        let h = endorsement_hash(b"e");
+        assert_eq!(approval_message_v3(&pairing(&a, &d, &ids, None), &h), None);
+        let described = pairing(&a, &d, &ids, Some(D));
+        let v3 = approval_message_v3(&described, &h).expect("described");
+        assert_ne!(v3, approval_message_v2(&described, &h));
+        assert_ne!(DEVICE_APPROVAL_V3_CONTEXT, DEVICE_APPROVAL_V2_CONTEXT);
+        let other_endorsement = endorsement_hash(b"f");
+        assert_ne!(
+            Some(v3),
+            approval_message_v3(&described, &other_endorsement)
+        );
     }
 }

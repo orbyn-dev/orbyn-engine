@@ -19,14 +19,15 @@
 //! Removing a device carries the remover's signature, which every device checks.
 
 use super::{
-    AccountError, Accounts, App, Approval, ApprovalView, AuditAction, Client, Device, DeviceState,
-    Platform, Removal, Result, Session, limits, public_keys,
+    AccountError, Accounts, App, Approval, AuditAction, Client, Device, DeviceState, Platform,
+    Removal, Result, Session, limits, public_keys,
 };
 use chrono::{DateTime, Utc};
 use orbyn_auth_client::{
-    DEVICE_APPROVAL_CONTEXT, DEVICE_APPROVAL_V2_CONTEXT, DEVICE_REMOVAL_CONTEXT,
-    MAX_REMOVAL_SEQUENCE, Pairing, approval_commitment, approval_message, approval_message_v2,
-    approval_sas, endorsement_hash, removal_message,
+    DEVICE_APPROVAL_CONTEXT, DEVICE_APPROVAL_V2_CONTEXT, DEVICE_APPROVAL_V3_CONTEXT,
+    DEVICE_REMOVAL_CONTEXT, Descriptor, MAX_REMOVAL_SEQUENCE, Pairing, approval_commitment,
+    approval_message, approval_message_v2, approval_message_v3, approval_sas, endorsement_hash,
+    removal_message,
 };
 use orbyn_crypto::DevicePublic;
 use sqlx::{Postgres, Transaction};
@@ -45,6 +46,30 @@ pub const MAX_ENDORSEMENT: usize = 16 * 1024;
 
 fn fresh(created_at: i64, now: i64) -> bool {
     (created_at - now).abs() <= CLOCK_SLACK_SECS
+}
+
+/// An approval as either of its devices sees it. Each later field is set by
+/// one step, in order: the commitment, the new device's nonce, the approver's
+/// nonce, then the approver's signature and endorsement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalView {
+    pub id: Uuid,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: i64,
+    pub approver_id: Uuid,
+    pub approver_keys: DevicePublic,
+    pub device_id: Uuid,
+    pub device_keys: DevicePublic,
+    /// The device's stored name, platform and app label. The commitment, the digits and the
+    /// approval signature cover them when the device has a label.
+    pub device_name: String,
+    pub device_platform: Platform,
+    pub device_app: Option<App>,
+    pub commitment: [u8; 32],
+    pub device_nonce: Option<[u8; 32]>,
+    pub approver_nonce: Option<[u8; 32]>,
+    pub signature: Option<[u8; 64]>,
+    pub endorsement: Option<Vec<u8>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -79,6 +104,9 @@ struct ApprovalRow {
     device_id: Uuid,
     device_signing: Vec<u8>,
     device_agreement: Vec<u8>,
+    device_name: String,
+    device_platform: String,
+    device_app: Option<String>,
     commitment: Option<Vec<u8>>,
     device_nonce: Option<Vec<u8>>,
     approver_nonce: Option<Vec<u8>>,
@@ -103,6 +131,7 @@ macro_rules! select_devices {
 const SELECT_APPROVAL: &str = "SELECT a.id, a.account_id, a.expires_at, a.approval_created_at,
         a.approver_id, ad.signing_key AS approver_signing, ad.agreement_key AS approver_agreement,
         a.device_id, d.signing_key AS device_signing, d.agreement_key AS device_agreement,
+        d.name AS device_name, d.platform AS device_platform, d.app AS device_app,
         a.commitment, a.device_nonce, a.approver_nonce, a.signature, a.endorsement, a.state,
         a.expires_at <= now() AS expired
      FROM device_approvals a
@@ -154,6 +183,9 @@ impl TryFrom<ApprovalRow> for ApprovalView {
             approver_keys: public_keys(&row.approver_signing, &row.approver_agreement)?,
             device_id: row.device_id,
             device_keys: public_keys(&row.device_signing, &row.device_agreement)?,
+            device_name: row.device_name,
+            device_platform: Platform::parse(&row.device_platform)?,
+            device_app: App::parse_opt(row.device_app.as_deref())?,
             commitment: fixed(row.commitment)?.ok_or(AccountError::ApprovalExpired)?,
             device_nonce: fixed(row.device_nonce)?,
             approver_nonce: fixed(row.approver_nonce)?,
@@ -184,25 +216,41 @@ fn pairing_of<'a>(
         approver: &view.approver_keys,
         device_id: &ids.2,
         device: &view.device_keys,
+        descriptor: view.device_app.map(|app| Descriptor {
+            name: &view.device_name,
+            platform: view.device_platform.as_str(),
+            app: app.as_str(),
+        }),
     }
 }
 
-/// How an approval signature verified: under the v2 message that covers the endorsement, or the
-/// v1 message of an approver that predates it.
+/// How an approval signature verified: under the v3 message of a device that named its app, the
+/// v2 message that covers the endorsement, or the v1 message of an approver that predates it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ApprovalSignature {
+    V3,
     V2,
     V1,
 }
 
-/// Checks an approver's signature on an approval: the v2 message over the endorsement's hash when
-/// an endorsement came with it, else (or when that fails, for an older approver) the v1 message.
+/// Checks an approver's signature on an approval. For a device that named its app, only the v3
+/// message over its description and the endorsement's hash counts, and an approval without an
+/// endorsement fails: no older message covers what the approver was shown. For any other device,
+/// the v2 message over the endorsement's hash when an endorsement came with it, else (or when that
+/// fails, for an older approver) the v1 message.
 fn verify_approval(
     signer: &DevicePublic,
     pairing: &Pairing<'_>,
     endorsement: Option<&[u8]>,
     signature: &[u8; 64],
 ) -> Result<ApprovalSignature> {
+    if pairing.descriptor.is_some() {
+        let message = endorsement
+            .and_then(|e| approval_message_v3(pairing, &endorsement_hash(e)))
+            .ok_or(AccountError::InvalidSignature)?;
+        verify_signed(signer, DEVICE_APPROVAL_V3_CONTEXT, &message, signature)?;
+        return Ok(ApprovalSignature::V3);
+    }
     if let Some(endorsement) = endorsement {
         let message = approval_message_v2(pairing, &endorsement_hash(endorsement));
         if verify_signed(signer, DEVICE_APPROVAL_V2_CONTEXT, &message, signature).is_ok() {

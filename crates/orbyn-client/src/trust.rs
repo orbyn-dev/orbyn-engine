@@ -260,6 +260,13 @@ impl Trust {
         else {
             return false;
         };
+        let described = device.app.map(|app| {
+            (
+                device.name.trim().to_owned(),
+                device.platform.as_str(),
+                app.as_str(),
+            )
+        });
         let pairing = auth::Pairing {
             account_id: &self.account,
             approval_id: &approval_id,
@@ -268,7 +275,29 @@ impl Trust {
             approver,
             device_id: &id,
             device: &public,
+            descriptor: described.as_ref().map(|d| auth::Descriptor {
+                name: &d.0,
+                platform: d.1,
+                app: d.2,
+            }),
         };
+        // A device that named its app is approved only under the v3 message, which covers its
+        // name, platform and app as listed: a server that changes any of them, or drops the label
+        // to fall back to an older message, makes the approval fail to verify.
+        if described.is_some() {
+            let Some(Some(hash)) = device.approval_endorsement_hash.as_deref().map(key32) else {
+                return false;
+            };
+            return auth::approval_message_v3(&pairing, &hash).is_some_and(|message| {
+                orbyn_crypto::verify(
+                    approver,
+                    auth::DEVICE_APPROVAL_V3_CONTEXT,
+                    &message,
+                    &signature,
+                )
+                .is_ok()
+            });
+        }
         // An approval that covers its endorsement says so by the endorsement's hash; one without
         // is an older approval, signed under the v1 message. A server that drops the hash only
         // makes the signature fail to verify.

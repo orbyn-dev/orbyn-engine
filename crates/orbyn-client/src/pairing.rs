@@ -41,6 +41,7 @@
 //! setting (see `protection`). Format 2, from an approver that predates settings, is still
 //! accepted and says no setting is known.
 
+use crate::described::Described;
 use crate::trust::{key32, public_of, uuid_bytes};
 use crate::{ClientError, Engine, Result, b64, random, unb64};
 use orbyn_auth_client as auth;
@@ -71,6 +72,10 @@ struct Bound {
     approver: DevicePublic,
     device_id: [u8; 16],
     device: DevicePublic,
+    /// The new device's name, platform and app, when it named its app. Then the commitment, the
+    /// digits and the approval signature cover them (the v3 message). It is the device's own
+    /// signed claim, so it says what the device asserted, never which app is running.
+    descriptor: Option<Described>,
 }
 
 impl Bound {
@@ -83,6 +88,7 @@ impl Bound {
             approver: &self.approver,
             device_id: &self.device_id,
             device: &self.device,
+            descriptor: self.descriptor.as_ref().map(Described::view),
         })
     }
 
@@ -103,6 +109,12 @@ impl Bound {
     /// The v2 approval message, which covers the endorsement's hash.
     fn message_v2(&self, endorsement_hash: &[u8; 32]) -> Vec<u8> {
         self.with(|p| auth::approval_message_v2(p, endorsement_hash))
+    }
+
+    /// The v3 approval message of a device that named its app: the v2 message and the device's
+    /// description. `None` for a device with no label.
+    fn message_v3(&self, endorsement_hash: &[u8; 32]) -> Option<Vec<u8>> {
+        self.with(|p| auth::approval_message_v3(p, endorsement_hash))
     }
 }
 
@@ -263,6 +275,7 @@ impl Engine {
             approver: self.keys.public(),
             device_id: uuid_bytes(&device.id)?,
             device: public_of(device).ok_or(ClientError::InvalidInput)?,
+            descriptor: Described::of(device),
         };
         let nonce = Zeroizing::new(random::<32>()?);
         let create = wire::CreateApproval {
@@ -326,12 +339,14 @@ impl Engine {
         endorsement.extend_from_slice(&entries);
         endorsement.extend_from_slice(&endorsement_signature);
         // The approval signature covers the endorsement, so it cannot be dropped or swapped.
-        let signature = self.keys.sign(
-            auth::DEVICE_APPROVAL_V2_CONTEXT,
-            &pairing
-                .bound
-                .message_v2(&auth::endorsement_hash(&endorsement)),
-        );
+        let hash = auth::endorsement_hash(&endorsement);
+        let signature = match pairing.bound.message_v3(&hash) {
+            Some(message) => self.keys.sign(auth::DEVICE_APPROVAL_V3_CONTEXT, &message),
+            None => self.keys.sign(
+                auth::DEVICE_APPROVAL_V2_CONTEXT,
+                &pairing.bound.message_v2(&hash),
+            ),
+        };
         Ok(wire::ConfirmApproval {
             signature: b64(&signature),
             endorsement: Some(b64(&endorsement)),
@@ -346,6 +361,29 @@ impl Engine {
         &self,
         view: &wire::PendingApproval,
         now_secs: i64,
+    ) -> Result<(DevicePairing, wire::ApprovalNonce)> {
+        self.join(view, now_secs, None)
+    }
+
+    /// As [`Engine::join_approval`] for a device that named its app at sign-in: `name`,
+    /// `platform` and `app` are what this device signed, so the digits it shows only match the
+    /// approver's if the approver was shown the same description.
+    pub fn join_approval_labelled(
+        &self,
+        view: &wire::PendingApproval,
+        now_secs: i64,
+        name: &str,
+        platform: wire::DevicePlatform,
+        app: wire::DeviceApp,
+    ) -> Result<(DevicePairing, wire::ApprovalNonce)> {
+        self.join(view, now_secs, Some(Described::new(name, platform, app)))
+    }
+
+    fn join(
+        &self,
+        view: &wire::PendingApproval,
+        now_secs: i64,
+        descriptor: Option<Described>,
     ) -> Result<(DevicePairing, wire::ApprovalNonce)> {
         let me = self.keys.public();
         let mine = view.device_id == self.trust.device_id
@@ -364,6 +402,7 @@ impl Engine {
             approver: keys_of(&view.approver_signing_key, &view.approver_agreement_key)?,
             device_id: uuid_bytes(&self.trust.device_id)?,
             device: me,
+            descriptor,
         };
         let nonce: [u8; 32] = random()?;
         Ok((
@@ -411,15 +450,23 @@ impl Engine {
         // swapping the endorsement then breaks the signature, and an approval with no endorsement
         // cannot pass as one. Only an approver that predates this signs the v1 message, and it
         // cannot make a format 3 endorsement.
+        // A device that named its app accepts only the v3 message, which covers the description it
+        // signed in with: an approver that was shown something else cannot have signed it.
+        let described = pairing.bound.descriptor.is_some();
         let v2 = endorsement_bytes.as_deref().is_some_and(|e| {
-            orbyn_crypto::verify(
-                &pairing.bound.approver,
-                auth::DEVICE_APPROVAL_V2_CONTEXT,
-                &pairing.bound.message_v2(&auth::endorsement_hash(e)),
-                &signature,
-            )
-            .is_ok()
+            let hash = auth::endorsement_hash(e);
+            let (context, message) = match pairing.bound.message_v3(&hash) {
+                Some(message) => (auth::DEVICE_APPROVAL_V3_CONTEXT, message),
+                None => (
+                    auth::DEVICE_APPROVAL_V2_CONTEXT,
+                    pairing.bound.message_v2(&hash),
+                ),
+            };
+            orbyn_crypto::verify(&pairing.bound.approver, context, &message, &signature).is_ok()
         });
+        if described && !v2 {
+            return Err(ClientError::Mismatch);
+        }
         if !v2 {
             orbyn_crypto::verify(
                 &pairing.bound.approver,
