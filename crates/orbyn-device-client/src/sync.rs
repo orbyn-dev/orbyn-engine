@@ -11,8 +11,12 @@ use crate::{Clock, DeviceApi, KeyStore};
 use orbyn_client::{Applied, ClientError, Engine, RefusedEnvelope, Snapshot};
 use orbyn_contracts as wire;
 
-/// How many times one zone's upload is retried inside a pass (a conflict merges and goes again).
-const MAX_UPLOAD_ROUNDS: usize = 8;
+/// How many conflicts one zone's upload merges inside a pass before the pass gives up on it.
+const MAX_CONFLICT_ROUNDS: usize = 8;
+/// How many times one zone may start again (a 410) inside a pass, on a pull or an upload.
+const MAX_RESTARTS: usize = 3;
+/// A safety stop on the batches one pass sends for one zone (each holds up to 200 records).
+const MAX_BATCHES: usize = 1000;
 /// The most envelopes one request carries.
 const ENVELOPES_PER_REQUEST: usize = 100;
 
@@ -237,7 +241,7 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
             zone: zone.to_owned(),
             ..ZoneReport::default()
         };
-        for _ in 0..3 {
+        for _ in 0..MAX_RESTARTS {
             self.pull(engine, zone, &mut report.applied).await?;
             match self.push(engine, zone, &mut report).await {
                 Ok(false) => return Ok(report),
@@ -275,7 +279,7 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
                 // The server purged history this device has not seen: fetch from the start.
                 410 => {
                     restarts += 1;
-                    if restarts > 3 {
+                    if restarts > MAX_RESTARTS {
                         return Err(failure(&response));
                     }
                     engine.token_expired(zone).map_err(engine_error)?;
@@ -304,7 +308,8 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         zone: &str,
         report: &mut ZoneReport,
     ) -> Result<bool, DeviceError> {
-        for _ in 0..MAX_UPLOAD_ROUNDS {
+        let mut conflicts = 0;
+        for _ in 0..MAX_BATCHES {
             let Some(upload) = engine.build_upload(zone).map_err(engine_error)? else {
                 return Ok(false);
             };
@@ -332,6 +337,15 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
                     .upload_conflicted(zone, &conflict, self.now_millis())
                     .map_err(engine_error)?;
                 merge(&mut report.applied, applied);
+                conflicts += 1;
+                // Something keeps changing the same records: stop. Everything stays staged and
+                // the next pass tries again.
+                if conflicts >= MAX_CONFLICT_ROUNDS {
+                    return Err(DeviceError::Server {
+                        status: 409,
+                        code: "record_changed".to_owned(),
+                    });
+                }
                 continue;
             }
             if response.status == 410 {
@@ -339,7 +353,9 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
                 return Ok(true);
             }
             let error = failure(&response);
-            // A batch the server will never take is dropped, so the next pass does not loop on it.
+            // The batch in flight is cleared, but its records stay dirty: the next pass builds the
+            // same batch and gets `TooLarge` again until the host makes a record smaller or
+            // deletes it. The error is how the host learns of it.
             if error == DeviceError::TooLarge {
                 engine.abandon_upload(zone).map_err(engine_error)?;
             }

@@ -43,6 +43,7 @@ fn quick() -> NoticeConfig {
         first_delay: Duration::from_millis(20),
         max_delay: Duration::from_millis(100),
         idle_timeout: Duration::from_secs(5),
+        connect_timeout: Duration::from_secs(2),
     }
 }
 
@@ -175,5 +176,144 @@ async fn without_a_session_or_an_address_there_is_no_stream() {
     assert_eq!(
         client.notices(quick()).err(),
         Some(orbyn_device_client::DeviceError::NotSignedIn)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_that_reaches_ready_starts_the_delay_over() {
+    // The server accepts three connections, each says ready and drops. With the delay reset by
+    // each ready, the pause before the third is as short as the pause before the second (about
+    // 200 ms); without it, the second pause has doubled (about 400 ms).
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = format!("http://{}", listener.local_addr().expect("addr"));
+    let server = tokio::spawn(async move {
+        let mut at = Vec::new();
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await.expect("accept");
+            at.push(std::time::Instant::now());
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("handshake");
+            let _ = socket.next().await;
+            socket
+                .send(Message::text(r#"{"type":"ready","device_id":"device"}"#))
+                .await
+                .expect("ready");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(socket);
+        }
+        at
+    });
+    let config = NoticeConfig {
+        first_delay: Duration::from_millis(200),
+        max_delay: Duration::from_secs(5),
+        idle_timeout: Duration::from_secs(5),
+        connect_timeout: Duration::from_secs(2),
+    };
+    let client = client_for(&address).await;
+    let _notices = client.notices(config).expect("stream");
+    let at = server.await.expect("server");
+    let first = at[1].duration_since(at[0]);
+    let second = at[2].duration_since(at[1]);
+    assert!(first >= Duration::from_millis(150), "{first:?}");
+    assert!(
+        second < Duration::from_millis(330),
+        "the delay was not reset: {second:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_never_answers_the_handshake_is_given_up_on() {
+    // Accepts the TCP connection and says nothing: without a connect timeout the stream hangs.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    let config = NoticeConfig {
+        connect_timeout: Duration::from_millis(150),
+        ..quick()
+    };
+    let client = client_for(&address).await;
+    let mut notices = client.notices(config).expect("stream");
+    assert_eq!(next(&mut notices).await, Notice::Disconnected);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transport_that_reports_a_plain_text_address_off_loopback_gets_no_stream() {
+    use orbyn_device_client::{DeviceApi, DeviceError, Request, Response};
+    struct Remote;
+    impl DeviceApi for Remote {
+        async fn send(&self, _: Request) -> Result<Response, DeviceError> {
+            Err(DeviceError::Transport)
+        }
+        fn base_url(&self) -> Option<&str> {
+            Some("http://example.com")
+        }
+    }
+    let store = MemoryStore::new();
+    store
+        .save(&StoredIdentity {
+            device_keys: Zeroizing::new([3u8; 64]),
+            account_id: "a".to_owned(),
+            device_id: "d".to_owned(),
+            email: "a@example.test".to_owned(),
+            session: Some(StoredSession {
+                token: Zeroizing::new("t".to_owned()),
+                expires_at: String::new(),
+            }),
+            vault_key: Zeroizing::new([4u8; 32]),
+        })
+        .expect("save");
+    let client = DeviceClient::new(
+        Remote,
+        store,
+        SystemClock,
+        ClientConfig {
+            device_name: "x".to_owned(),
+            platform: DevicePlatform::Linux,
+        },
+    );
+    assert!(matches!(
+        client.notices(quick()),
+        Err(DeviceError::InvalidInput(_))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_message_ends_the_connection_instead_of_being_read() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake");
+        let _ = socket.next().await;
+        socket
+            .send(Message::text(r#"{"type":"ready","device_id":"device"}"#))
+            .await
+            .expect("ready");
+        let big = format!(
+            r#"{{"type":"zone_changed","zone":"{}","token":"t"}}"#,
+            "z".repeat(200_000)
+        );
+        let _ = socket.send(Message::text(big)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+    let config = NoticeConfig {
+        first_delay: Duration::from_secs(30),
+        ..quick()
+    };
+    let client = client_for(&address).await;
+    let mut notices = client.notices(config).expect("stream");
+    assert_eq!(next(&mut notices).await, Notice::Connected);
+    assert_eq!(
+        next(&mut notices).await,
+        Notice::Disconnected,
+        "no notice came from the huge frame"
     );
 }

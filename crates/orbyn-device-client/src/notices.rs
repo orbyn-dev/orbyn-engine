@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 /// What the stream tells the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +39,8 @@ pub struct NoticeConfig {
     pub max_delay: Duration,
     /// A connection that hears nothing for this long (the server pings) is dropped and redone.
     pub idle_timeout: Duration,
+    /// The most time to connect and finish the WebSocket handshake.
+    pub connect_timeout: Duration,
 }
 
 impl Default for NoticeConfig {
@@ -46,6 +49,7 @@ impl Default for NoticeConfig {
             first_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(60),
             idle_timeout: Duration::from_secs(120),
+            connect_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -69,18 +73,23 @@ impl Drop for Notices {
     }
 }
 
-/// `http` to `ws`, `https` to `wss`, and the sync path.
+/// `https` to `wss`, and `http` to `ws` **only for a loopback IP literal**, plus the sync path.
+/// Any other plain-text address is refused, whatever a transport reports as its base.
 pub(crate) fn websocket_address(base: &str) -> Option<String> {
-    let rest = base
-        .strip_prefix("https://")
-        .map(|r| ("wss", r))
-        .or_else(|| base.strip_prefix("http://").map(|r| ("ws", r)))?;
-    Some(format!(
-        "{}://{}/v1/sync",
-        rest.0,
-        rest.1.trim_end_matches('/')
-    ))
+    let (scheme, rest) = if let Some(rest) = base.strip_prefix("https://") {
+        ("wss", rest)
+    } else if let Some(rest) = base.strip_prefix("http://")
+        && crate::is_loopback_literal(base)
+    {
+        ("ws", rest)
+    } else {
+        return None;
+    };
+    Some(format!("{scheme}://{}/v1/sync", rest.trim_end_matches('/')))
 }
+
+/// The most a notice frame or message may hold. Notices are a few hundred bytes.
+const MAX_FRAME: usize = 16 * 1024;
 
 /// The delay before attempt number `attempt` (0 is the first), with up to a fifth of jitter.
 pub(crate) fn backoff(config: &NoticeConfig, attempt: u32) -> Duration {
@@ -125,13 +134,28 @@ async fn run(
 ) {
     let mut attempt = 0u32;
     loop {
-        match tokio_tungstenite::connect_async(address.as_str()).await {
-            Ok((mut socket, _)) => {
-                let auth = serde_json::to_string(&wire::SyncClientMessage::Auth {
-                    token: token.to_string(),
-                })
-                .unwrap_or_default();
-                if socket.send(Message::text(auth)).await.is_ok() {
+        let limits = WebSocketConfig::default()
+            .max_message_size(Some(MAX_FRAME))
+            .max_frame_size(Some(MAX_FRAME));
+        let connected = tokio::time::timeout(
+            config.connect_timeout,
+            tokio_tungstenite::connect_async_with_config(address.as_str(), Some(limits), false),
+        )
+        .await;
+        match connected {
+            Ok(Ok((mut socket, _))) => {
+                // The sign-in message is written by hand into a wiped buffer, so the token is not
+                // copied into a string that is dropped without being wiped. A token has only
+                // URL-safe characters; anything else is not sent.
+                let safe = token
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'));
+                let auth = zeroize::Zeroizing::new(if safe {
+                    format!(r#"{{"type":"auth","token":"{}"}}"#, token.as_str())
+                } else {
+                    String::new()
+                });
+                if safe && socket.send(Message::text(auth.as_str())).await.is_ok() {
                     loop {
                         let next = tokio::time::timeout(config.idle_timeout, socket.next()).await;
                         let Ok(Some(Ok(message))) = next else { break };
@@ -172,7 +196,7 @@ async fn run(
                     return;
                 }
             }
-            Err(_) => {
+            Ok(Err(_)) | Err(_) => {
                 if tx.send(Notice::Disconnected).await.is_err() {
                     return;
                 }
@@ -198,6 +222,16 @@ mod tests {
             Some("ws://127.0.0.1:8080/v1/sync")
         );
         assert_eq!(websocket_address("ftp://x"), None);
+        // Plain text only to a loopback IP literal: a transport that reports http://anything gets
+        // no stream, and a name such as localhost is not a literal.
+        for refused in [
+            "http://example.com",
+            "http://localhost:8080",
+            "http://192.168.1.2",
+            "http://127.0.0.1.evil.example",
+        ] {
+            assert_eq!(websocket_address(refused), None, "{refused}");
+        }
     }
 
     #[test]
