@@ -49,6 +49,8 @@ fn answer(status: u16, body: Value) -> Result<Response, DeviceError> {
 
 impl DeviceApi for Script {
     async fn send(&self, request: Request) -> Result<Response, DeviceError> {
+        // Lets the runtime run its timers, so a pass stuck in a loop is stopped by the deadline.
+        tokio::task::yield_now().await;
         self.seen
             .lock()
             .expect("lock")

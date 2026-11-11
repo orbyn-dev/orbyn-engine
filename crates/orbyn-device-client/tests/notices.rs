@@ -87,7 +87,7 @@ async fn it_signs_in_first_answers_pings_and_reconnects_after_a_drop() {
         })
         .await
         .expect("a pong in time");
-        assert_eq!(pong.as_deref().map(|d| &d[..]), Some(&b"are you there"[..]));
+        assert_eq!(pong.as_deref(), Some(&b"are you there"[..]));
         socket
             .send(Message::text(
                 r#"{"type":"zone_changed","zone":"engineering.settings","token":"t1"}"#,
