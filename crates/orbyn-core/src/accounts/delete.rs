@@ -574,7 +574,7 @@ impl Accounts {
         tx: &mut Transaction<'_, Postgres>,
         session: &Session,
     ) -> Result<bool> {
-        Ok(signed_in_recently(&mut **tx, session).await?)
+        Ok(signed_in_recently(tx, session).await?)
     }
 
     /// [`AccountError::ReauthenticationRequired`] unless the session finished its sign-in in the
