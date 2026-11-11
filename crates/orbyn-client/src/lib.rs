@@ -360,8 +360,9 @@ pub struct RefusedEnvelope {
 }
 
 /// The engine's state for the host to store. It holds zone keys: a host must
-/// seal it before it leaves the process (`orbyn-wasm` does).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// seal it before it leaves the process (`orbyn-wasm` does). Its `Debug` prints the account, the
+/// device and the number of zones, and never a key or a record.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub account_id: String,
     pub device_id: String,
@@ -386,7 +387,9 @@ pub struct Snapshot {
     pub zones: BTreeMap<String, ZoneSnapshot>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// One zone of a [`Snapshot`]: its keys (base64url), its records and its upload state. Its
+/// `Debug` prints counts only, never a key or a record.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ZoneSnapshot {
     /// Key id to key, both base64url.
     pub keys: BTreeMap<String, String>,
@@ -404,6 +407,25 @@ pub struct ZoneSnapshot {
     refetch: Option<BTreeSet<String>>,
     #[serde(default)]
     refetch_restarts: u8,
+}
+
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Snapshot")
+            .field("account_id", &self.account_id)
+            .field("device_id", &self.device_id)
+            .field("zones", &self.zones.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ZoneSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZoneSnapshot")
+            .field("keys", &self.keys.len())
+            .field("records", &self.records.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One device's sync engine.

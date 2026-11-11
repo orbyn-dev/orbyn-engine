@@ -12,12 +12,11 @@
 
 use orbyn_contracts::{DeviceApp, DevicePlatform, DeviceState};
 use orbyn_device_client::{
-    ClientConfig, DeviceClient, DeviceError, HttpApi, MemoryStore, SignInOutcome, SignUpRequest,
-    SystemClock,
+    ClientConfig, DeviceClient, DeviceError, HttpApi, MemoryStore, Password, SignInOutcome,
+    SignUpRequest, SystemClock,
 };
 use std::process::Command;
 use std::time::Duration;
-use zeroize::Zeroizing;
 
 fn script(args: &[&str]) -> String {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/local.sh");
@@ -51,7 +50,7 @@ async fn sign_up_second_device_re_login_and_sign_out_everywhere() {
         eprintln!("skipped: set ORBYN_LOCAL_STACK=1 with the local stack up (scripts/local.sh up)");
         return;
     }
-    let password = Zeroizing::new("correct horse battery staple".to_owned());
+    let password = Password::new("correct horse battery staple");
     let email = format!("e2e-{}@example.test", uuid::Uuid::new_v4().simple());
     let invite = script(&["invite-code", "device-client"]);
     assert_eq!(invite.len(), 19, "an invite code: {invite:?}");
@@ -94,7 +93,7 @@ async fn sign_up_second_device_re_login_and_sign_out_everywhere() {
     let third = client("Third");
     assert_eq!(
         third
-            .sign_in(&email, &Zeroizing::new("wrong horse".to_owned()))
+            .sign_in(&email, &Password::new("wrong horse"))
             .await
             .err(),
         Some(DeviceError::LoginFailed)

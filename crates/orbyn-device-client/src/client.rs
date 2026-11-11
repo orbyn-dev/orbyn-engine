@@ -4,6 +4,7 @@
 use crate::api::{DeviceApi, Method, Request, Response};
 use crate::clock::Clock;
 use crate::error::DeviceError;
+use crate::password::Password;
 use crate::status::SyncStatus;
 use crate::store::{KeyStore, StoredIdentity, StoredSession};
 use base64::Engine as _;
@@ -39,9 +40,6 @@ struct SecondFactorBody<'a> {
     code: Option<&'a str>,
     recovery_code: Option<&'a str>,
 }
-
-/// A password. Wiped when dropped.
-pub type Password = Zeroizing<String>;
 
 /// What the host says about this device.
 #[derive(Clone, Debug)]

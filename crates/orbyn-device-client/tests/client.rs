@@ -6,7 +6,7 @@ mod support;
 use orbyn_contracts::{DeviceApp, DevicePlatform, DeviceState};
 use orbyn_device_client::{
     ClientConfig, Clock, DeviceApi, DeviceClient, DeviceError, HttpApi, KeyStore, MemoryStore,
-    Method, Request, Response, SecondFactor, SignInOutcome, SignUpRequest, StoreError,
+    Method, Password, Request, Response, SecondFactor, SignInOutcome, SignUpRequest, StoreError,
     StoredIdentity,
 };
 use std::sync::Arc;
@@ -42,8 +42,8 @@ fn client(engine: &FakeEngine, name: &str) -> Client {
     )
 }
 
-fn password(text: &str) -> Zeroizing<String> {
-    Zeroizing::new(text.to_owned())
+fn password(text: &str) -> Password {
+    Password::new(text)
 }
 
 fn request(invite: Option<&str>) -> SignUpRequest {
@@ -214,13 +214,19 @@ async fn the_second_factor_is_asked_of_a_new_device_and_skipped_by_a_trusted_sta
         "nothing is kept before the factor"
     );
     assert_eq!(
-        b.complete_second_factor(&challenge, SecondFactor::Code(password("000000")))
-            .await
-            .err(),
+        b.complete_second_factor(
+            &challenge,
+            SecondFactor::Code(Zeroizing::new("000000".to_owned()))
+        )
+        .await
+        .err(),
         Some(DeviceError::SecondFactorFailed)
     );
     let outcome = b
-        .complete_second_factor(&challenge, SecondFactor::Code(password("123456")))
+        .complete_second_factor(
+            &challenge,
+            SecondFactor::Code(Zeroizing::new("123456".to_owned())),
+        )
         .await
         .expect("the right code");
     assert!(
@@ -631,6 +637,26 @@ fn flaky_client(
             app: None,
         },
     )
+}
+
+#[test]
+fn debug_of_a_password_never_shows_the_text() {
+    let secret = "correct horse battery staple";
+    let password = Password::new(secret);
+    for text in [
+        format!("{password:?}"),
+        format!("{password:#?}"),
+        format!("{:?}", Some(&password)),
+        format!("{:?}", vec![password.clone()]),
+    ] {
+        assert!(!text.contains(secret), "{text}");
+        assert!(!text.contains("horse"), "{text}");
+        assert!(text.contains("Password(..)"), "{text}");
+    }
+    // It still works as a password.
+    assert_eq!(password.as_str(), secret);
+    assert_eq!(password.as_bytes(), secret.as_bytes());
+    assert!(!password.is_empty() && Password::from(String::new()).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

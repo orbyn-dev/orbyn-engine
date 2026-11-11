@@ -9,6 +9,7 @@ mod client;
 mod clock;
 mod error;
 mod notices;
+mod password;
 mod signup;
 mod status;
 mod store;
@@ -17,12 +18,13 @@ mod sync;
 pub use api::{DeviceApi, HttpApi, Method, Request, Response, is_loopback_literal};
 pub use approvals::{ApproverApproval, ApproverState, JoinedApproval};
 pub use client::{
-    ClientConfig, DeviceClient, Password, SecondFactor, SecondFactorChallenge, SessionInfo,
-    SignInOutcome, SignUpRequest,
+    ClientConfig, DeviceClient, SecondFactor, SecondFactorChallenge, SessionInfo, SignInOutcome,
+    SignUpRequest,
 };
 pub use clock::{Clock, SystemClock};
 pub use error::{DeviceError, StoreError};
 pub use notices::{Notice, NoticeConfig, Notices};
+pub use password::Password;
 pub use signup::PendingSignUp;
 pub use status::{SyncState, SyncStatus};
 pub use store::{KeyStore, MemoryStore, StoredIdentity, StoredSession};

@@ -131,11 +131,15 @@ The app may not depend on or name `orbyn-contracts` (rule D6). Every type of ano
 | `orbyn-client` | `Engine`, `Snapshot`, `Applied`, `RejectedFields`, `RefusedEnvelope`, `ClientError`, `Peer`, `Local`, `Quarantined`, `Trashed` | `open_engine`, `sync_all`, `SyncReport` and the engine's own return types |
 | `orbyn-sync` (through `orbyn-client`) | `Fields`, `Stamp` | staging and reading records |
 | `orbyn-crypto` (through `orbyn-client`) | `DeviceKeys`, `DevicePublic` | `StoredIdentity::keys()`, device keys |
-| `zeroize` | `Zeroizing` | `Password`, `StoredIdentity` |
+| `zeroize` | `Zeroizing` | `StoredIdentity`, `SecondFactor` |
 
 `orbyn-client` re-exports, besides those, the other contract types its `Engine` methods take or return (`ZoneList`, `UploadChanges`, `UploadResult`, `RemoveDevice`, `DeleteZone`, `KeyEnvelope`, `NewKeyEnvelope`, `KeyRotation`, `ApprovalNonce`, `CreateApproval`, `ConfirmApproval`, `ProtectionChain`, `ProtectionLink`, `ProtectionLevel`, `SetProtection`, `Record`, `RecordChanged`, `ZoneChanges`).
 
 Left out on purpose: the planner's `Item` and `ItemError` (planner only); the request and response bodies this crate sends and reads internally (`RegisterFinish`, `EmailVerify` and the like) and `orbyn-auth-client`, which no public signature uses; `ApproverPairing` and `DevicePairing`, which `ApproverApproval` and `JoinedApproval` wrap. `DeviceError` carries only strings, numbers and a duration. `tests/single_crate.rs` here and `orbyn-client/tests/reexports.rs` use these types through the one crate, and a check fails if the first names another Engine crate.
+
+### Debug prints no secret
+
+A type that can hold secret material has a `Debug` that prints none: `Snapshot` (account, device and the number of zones) and `ZoneSnapshot` (counts) are manual, as are `StoredIdentity`, `StoredSession`, `SecondFactorChallenge`, `PendingSignUp`, `SymmetricKey` and `RecoveryKey`; `DeviceKeys`, `Engine`, `ApproverPairing`, `DevicePairing`, `SecondFactor`, `ApproverApproval` and `JoinedApproval` have no `Debug` at all. `Password` is **its own type** (`Password::new(text)`, `as_str`, `as_bytes`, `is_empty`, `From<String>`; wiped on drop) whose `Debug` prints `Password(..)` and nothing else, so it does not depend on the `zeroize` version a build resolves: `zeroize` 1.9 prints `Zeroizing { .. }` for a bare `Zeroizing<String>`, but 1.8 derives `Debug` and prints the contents. A host must still not format a bare `Zeroizing<String>` (the second-factor code inside `SecondFactor::Code` is one, and `SecondFactor` has no `Debug`). `orbyn-client/tests/snapshot_debug.rs` checks that `{:?}` and `{:#?}` of a snapshot show neither a zone key (hex, base64 or an array) nor a record, and `tests/client.rs` that a `Password` never shows its text. `Local`, `Trashed` and `Quarantined` show the record they cache by design: it is content, not key material.
 
 ### Tests
 
