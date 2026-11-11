@@ -1,0 +1,30 @@
+# The local stack for development and testing on one machine (docs/local.md): compose.yaml plus invite-only sign-up and the
+# staging mail mode, so the 8-character email codes appear in the worker log and nobody is mailed.
+#   docker compose --env-file .env.local -f compose.yaml -f compose.local.yaml up -d
+# Test data only. Never real accounts or real user data; never expose these ports.
+# It uses its own database, orbyn_local, in the compose Postgres, so it never touches the `orbyn` database or the throwaway
+# databases `cargo test` makes there.
+services:
+  migrate:
+    environment:
+      DATABASE_URL: postgres://orbyn@postgres:5432/orbyn_local
+  server:
+    environment:
+      DATABASE_URL: postgres://orbyn@postgres:5432/orbyn_local
+      ORBYN_ENV: staging
+      ORBYN_SIGNUP: invite
+      ORBYN_MAIL: log-codes
+      ORBYN_LOG: info
+      # The Planner's dev server, its preview and the desktop shell's own origin; the engine refuses any other browser origin.
+      ORBYN_ALLOWED_ORIGINS: ${ORBYN_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:5331,tauri://localhost,http://tauri.localhost}
+      ORBYN_ACCOUNT_URL: http://localhost:5331
+      ORBYN_CLIENT_IP_HEADER: ""
+  worker:
+    environment:
+      DATABASE_URL: postgres://orbyn@postgres:5432/orbyn_local
+      ORBYN_ENV: staging
+      ORBYN_SIGNUP: invite
+      ORBYN_MAIL: log-codes
+      ORBYN_LOG: info
+      ORBYN_AUTH_SETUP: ${ORBYN_AUTH_SETUP:-}
+      ORBYN_ACCOUNT_URL: http://localhost:5331
