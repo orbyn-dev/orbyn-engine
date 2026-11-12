@@ -11,9 +11,15 @@
 //! `deny_*`. Every approval is used once.
 
 use crate::client::{DeviceClient, json, parse};
+use crate::sync::segment;
 use crate::{Clock, DeviceApi, DeviceError, KeyStore, Method};
 use orbyn_client::{ApproverPairing, ClientError, DevicePairing, Engine};
 use orbyn_contracts as wire;
+use std::time::Duration;
+
+/// How many times the reveal is sent before a network failure is reported. The approval is not
+/// cancelled by a network failure: the person can ask again.
+const REVEAL_TRIES: usize = 3;
 
 fn mismatch(error: ClientError) -> DeviceError {
     match error {
@@ -29,6 +35,11 @@ fn mismatch(error: ClientError) -> DeviceError {
 pub struct ApproverApproval {
     pairing: ApproverPairing,
     revealed: bool,
+    /// The reveal the engine made, kept until the server has it: the engine makes it once, so a
+    /// network failure must be answered by sending this again, not by asking the engine again.
+    unsent_reveal: Option<wire::ApprovalNonce>,
+    /// When the server will close the approval, Unix seconds, as it last said.
+    expires_at: Option<i64>,
 }
 
 impl ApproverApproval {
@@ -37,8 +48,41 @@ impl ApproverApproval {
     }
 }
 
-/// What the approver's screen shows.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Unix seconds of an RFC 3339 time in UTC (`2026-11-12T01:02:03.456Z`, as the server writes it).
+/// Any other offset is `None`: the caller then shows no countdown rather than a wrong one.
+fn rfc3339_secs(text: &str) -> Option<i64> {
+    let text = text
+        .strip_suffix('Z')
+        .or_else(|| text.strip_suffix("+00:00"))?;
+    let (date, time) = text.split_once('T')?;
+    let mut d = date.split('-');
+    let (year, month, day): (i64, i64, i64) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
+    let time = time.split('.').next()?;
+    let mut t = time.split(':');
+    let (h, m, sec): (i64, i64, i64) = (
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+    );
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || h > 23 || m > 59 || sec > 60 {
+        return None;
+    }
+    // Days since 1970-01-01 (the civil-from-days algorithm, inverted).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + h * 3600 + m * 60 + sec)
+}
+
+/// What the approver's screen shows. Its `Debug` hides the digits and the fingerprint.
+#[derive(Clone, PartialEq, Eq)]
 pub enum ApproverState {
     /// The new device has not joined yet.
     Waiting,
@@ -48,6 +92,15 @@ pub enum ApproverState {
         /// The new device's key fingerprint, to show beside the digits.
         fingerprint: String,
     },
+}
+
+impl std::fmt::Debug for ApproverState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Waiting => f.write_str("Waiting"),
+            Self::Digits { .. } => f.write_str("Digits { .. }"),
+        }
+    }
 }
 
 /// An approval the new device joined. Use it once.
@@ -62,11 +115,18 @@ impl JoinedApproval {
 }
 
 impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
+    /// The path of an approval or one of its steps. The id is percent-encoded: on the new
+    /// device's side it comes from the server.
     fn approval_path(id: &str, step: Option<&str>) -> String {
+        let id = segment(id);
         match step {
             Some(step) => format!("/v1/devices/approvals/{id}/{step}"),
             None => format!("/v1/devices/approvals/{id}"),
         }
+    }
+
+    fn device_path(id: &str) -> String {
+        format!("/v1/devices/{}", segment(id))
     }
 
     /// Best effort: a cancel that fails changes nothing, and the approval ends in ten minutes.
@@ -108,6 +168,8 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         Ok(ApproverApproval {
             pairing,
             revealed: false,
+            unsent_reveal: None,
+            expires_at: rfc3339_secs(&created.expires_at),
         })
     }
 
@@ -123,24 +185,27 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
             .authed(Method::Get, &Self::approval_path(&id, None), None)
             .await?;
         let view: wire::PendingApproval = parse(&response.body)?;
+        approval.expires_at = rfc3339_secs(&view.expires_at).or(approval.expires_at);
         if view.device_nonce.is_none() {
             return Ok(ApproverState::Waiting);
         }
         if !approval.revealed {
-            let reveal = match approval.pairing.reveal(&view) {
-                Ok(reveal) => reveal,
-                Err(error) => {
-                    self.cancel_quietly(&id).await;
-                    return Err(mismatch(error));
-                }
+            let reveal = match approval.unsent_reveal.clone() {
+                Some(reveal) => reveal,
+                None => match approval.pairing.reveal(&view) {
+                    Ok(reveal) => reveal,
+                    Err(error) => {
+                        self.cancel_quietly(&id).await;
+                        return Err(mismatch(error));
+                    }
+                },
             };
-            self.authed(
-                Method::Post,
-                &Self::approval_path(&id, Some("reveal")),
-                Some(json(&reveal)?),
-            )
-            .await?;
+            // A reveal kept from an earlier try may have reached the server: ask before sending.
+            let resend = approval.unsent_reveal.is_some();
+            approval.unsent_reveal = Some(reveal.clone());
+            self.send_reveal(&id, &reveal, resend).await?;
             approval.revealed = true;
+            approval.unsent_reveal = None;
         }
         let digits = approval
             .pairing
@@ -150,6 +215,67 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
             digits,
             fingerprint: approval.pairing.device_fingerprint(),
         })
+    }
+
+    /// Whether the server already holds this reveal: its view of the approval shows our nonce.
+    async fn server_holds(&self, id: &str, reveal: &wire::ApprovalNonce) -> bool {
+        self.authed(Method::Get, &Self::approval_path(id, None), None)
+            .await
+            .ok()
+            .and_then(|r| parse::<wire::PendingApproval>(&r.body).ok())
+            .is_some_and(|v| v.approver_nonce.as_deref() == Some(&reveal.nonce))
+    }
+
+    /// Sends the reveal, again if the network fails. A failure never cancels the approval: this
+    /// device's nonce may have arrived, and the server takes it once (a second send is 409
+    /// `approval_out_of_order`). So the server is asked whether it holds the nonce before a kept
+    /// reveal is sent again (`resend`), after a network failure, and after that 409; "held" counts
+    /// as sent. Only an answer from the server that refuses the reveal ends the approval, and the
+    /// server does that itself.
+    async fn send_reveal(
+        &self,
+        id: &str,
+        reveal: &wire::ApprovalNonce,
+        resend: bool,
+    ) -> Result<(), DeviceError> {
+        if resend && self.server_holds(id, reveal).await {
+            return Ok(());
+        }
+        let mut last = DeviceError::Transport;
+        for _ in 0..REVEAL_TRIES {
+            let sent = self
+                .authed(
+                    Method::Post,
+                    &Self::approval_path(id, Some("reveal")),
+                    Some(json(reveal)?),
+                )
+                .await;
+            match sent {
+                Ok(_) => return Ok(()),
+                Err(error @ (DeviceError::Transport | DeviceError::ApprovalNotReady)) => {
+                    if self.server_holds(id, reveal).await {
+                        return Ok(());
+                    }
+                    if error == DeviceError::ApprovalNotReady {
+                        // Not held and still out of order: it is not ours to retry.
+                        return Err(error);
+                    }
+                    last = error;
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        Err(last)
+    }
+
+    /// How long the server will keep the approval open, from the time it gave when it opened it
+    /// (refreshed by [`DeviceClient::approval_state`]) and this device's clock. `None` when the
+    /// server's time could not be read. Zero once it passed: the server then answers
+    /// [`DeviceError::ApprovalExpired`]. A clock that is off by seconds shows a countdown that is
+    /// off by seconds; the server decides, not this.
+    pub fn time_left(&self, approval: &ApproverApproval) -> Option<Duration> {
+        let left = approval.expires_at? - self.clock.now_secs();
+        Some(Duration::from_secs(u64::try_from(left).unwrap_or(0)))
     }
 
     /// The person confirmed that both screens show the same digits: signs the approval with the
@@ -177,6 +303,11 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
 
     /// The person said the digits differ, or cancelled: ends the approval on the server.
     pub async fn deny_approval(&self, approval: ApproverApproval) -> Result<(), DeviceError> {
+        // An approval that already ended (expired, answered, used or cancelled by either device)
+        // is `ApprovalExpired` here: the server answers 410 to this read, nothing is sent to end
+        // it again and nothing is approved.
+        self.authed(Method::Get, &Self::approval_path(approval.id(), None), None)
+            .await?;
         self.authed(
             Method::Post,
             &Self::approval_path(approval.id(), Some("cancel")),
@@ -314,10 +445,61 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         let body = engine.sign_removal(device).map_err(mismatch)?;
         self.authed(
             Method::Delete,
-            &format!("/v1/devices/{}", device.id),
+            &Self::device_path(&device.id),
             Some(json(&body)?),
         )
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{HttpApi, MemoryStore, SystemClock};
+
+    type Client = DeviceClient<HttpApi, MemoryStore, SystemClock>;
+
+    #[test]
+    fn ids_are_percent_encoded_in_every_path() {
+        assert_eq!(
+            Client::approval_path("a/b?c", Some("reveal")),
+            "/v1/devices/approvals/a%2Fb%3Fc/reveal"
+        );
+        assert_eq!(
+            Client::approval_path("a/b?c", None),
+            "/v1/devices/approvals/a%2Fb%3Fc"
+        );
+        assert_eq!(Client::device_path("a/b?c"), "/v1/devices/a%2Fb%3Fc");
+        // A uuid is unchanged.
+        let id = "0000000a-0000-4000-8000-00000000000a";
+        assert_eq!(
+            Client::approval_path(id, Some("nonce")),
+            format!("/v1/devices/approvals/{id}/nonce")
+        );
+    }
+
+    #[test]
+    fn the_server_time_is_read_as_utc_and_nothing_else_is_guessed() {
+        assert_eq!(rfc3339_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            rfc3339_secs("2027-01-15T08:00:00.123Z"),
+            Some(1_800_000_000)
+        );
+        assert_eq!(
+            rfc3339_secs("2024-02-29T12:00:00+00:00"),
+            Some(1_709_208_000)
+        );
+        assert_eq!(rfc3339_secs("1969-12-31T23:59:59Z"), Some(-1));
+        for bad in [
+            "2027-01-15T10:00:00+02:00",
+            "2027-01-15 08:00:00Z",
+            "2027-13-15T08:00:00Z",
+            "2027-01-15T25:00:00Z",
+            "garbage",
+            "",
+        ] {
+            assert_eq!(rfc3339_secs(bad), None, "{bad}");
+        }
     }
 }

@@ -117,6 +117,32 @@ The client only moves messages between the engine and the server, in order. Ever
 
 The label is the device's own signed claim, never proof of which app is running.
 
+### Mapping an approve/deny list onto the client
+
+An app adapter that shows "devices waiting for approval" builds its requests from `devices()` and drives one approval per request:
+
+```rust
+// A request per device this device does not trust yet (the engine decides what it trusts).
+let list = client.devices().await?;
+let waiting = list.devices.iter().filter(|d| d.state == DeviceState::Pending);
+
+let mut approval = client.start_approval(&engine, &device.id).await?;
+loop {
+    match client.approval_state(&mut approval).await? {
+        ApproverState::Waiting => { /* the new device has not joined: wait, show client.time_left(&approval) */ }
+        ApproverState::Digits { digits, fingerprint } => { /* show them, ask the person */ break; }
+    }
+}
+// "They match":  client.confirm_approval(&mut engine, approval).await?;
+// "They differ": client.deny_approval(approval).await?;
+```
+
+- **Expired, answered or given up.** An approval that expired, was cancelled or answered by either device, or was used gives `DeviceError::ApprovalExpired` from `approval_state`, `confirm_approval` and `deny_approval`, and nothing is approved: the server refuses a confirm after the end, and a deny reads the approval first so it sends no second cancel. Show it as "this request ended" and start a new one if the person still wants it.
+- **A network failure is not an answer.** The reveal is sent up to three times. The server takes it once (a second send is a 409), so it is asked whether it already holds it before a kept reveal is sent again, after a network failure and after that 409, and "held" counts as sent; a failure that outlasts the tries is `DeviceError::Transport` and leaves the approval open, so call `approval_state` again. Only a real mismatch (other keys, another commitment) cancels it.
+- **Time left.** `time_left(&approval)` is the server's expiry (from `start_approval`, refreshed by each `approval_state`) minus this device's clock, zero once passed and `None` when the time could not be read. It is a display hint: the server decides.
+- **Deny carries no reason yet.** `deny_approval` ends the approval and says nothing more to the new device; a reason would need a wire change.
+- `ApproverState`'s `Debug` prints `Digits { .. }`: the digits and the fingerprint are never in a log line.
+
 ### Not here yet
 
 The account's protection chain is not signed by the client; the host's first protection setting follows the rules in [architecture.md](architecture.md).
