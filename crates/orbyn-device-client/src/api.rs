@@ -111,6 +111,10 @@ impl HttpApi {
         }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // No proxy from the environment, loopback included: reqwest reads `HTTP_PROXY`,
+            // `HTTPS_PROXY` and `ALL_PROXY` by default and does not exempt 127.0.0.1, so a request
+            // with the bearer token would go to whatever the machine names as its proxy.
+            .no_proxy()
             .timeout(TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
             .https_only(!loopback)
