@@ -171,6 +171,30 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         Ok(info)
     }
 
+    /// Asks the server whether an invite code can start a sign-up, before the person types the
+    /// rest (`POST /v1/invites/check`). `Ok` means it can; nothing is used up. An unknown, used or
+    /// expired code is [`DeviceError::InviteInvalid`] with one answer for all three, and too many
+    /// wrong tries from this address are [`DeviceError::RateLimited`]. A server that does not ask
+    /// for invites says yes to any code. The code is sent as typed; the server ignores case,
+    /// spaces and hyphens.
+    pub async fn check_invite(&self, code: &str) -> Result<(), DeviceError> {
+        let response = self
+            .call(
+                Method::Post,
+                "/v1/invites/check",
+                None,
+                Some(json(&wire::InviteCheck {
+                    invite: code.to_owned(),
+                })?),
+            )
+            .await?;
+        if is_ok(&response) {
+            Ok(())
+        } else {
+            Err(failure(&response))
+        }
+    }
+
     /// Asks for the code again (the server allows three an hour and answers the same whatever
     /// happens).
     pub async fn resend_sign_up(&self, pending: &PendingSignUp) -> Result<(), DeviceError> {

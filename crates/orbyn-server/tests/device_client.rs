@@ -62,6 +62,11 @@ struct Server {
 impl Server {
     /// The real app on Postgres, served on a loopback port.
     async fn start() -> Self {
+        Self::start_mode(orbyn_core::SignupMode::Open).await
+    }
+
+    /// The same, with sign-up open or by invite.
+    async fn start_mode(mode: orbyn_core::SignupMode) -> Self {
         let url =
             std::env::var("DATABASE_URL").expect("set DATABASE_URL to run the Postgres tests");
         let db = Database::connect(&url).await.expect("connect to Postgres");
@@ -79,7 +84,7 @@ impl Server {
         };
         let accounts = Accounts::new(db.pool().clone(), secrets)
             .with_limits(limits)
-            .with_signup(orbyn_core::SignupMode::Open);
+            .with_signup(mode);
         let hub = Hub::start(db.pool().clone());
         let store = Store::new(db.pool().clone(), hub);
         let state = AppState::new(Arc::new(Up))
@@ -957,5 +962,64 @@ async fn the_approver_cannot_confirm_or_deny_an_approval_the_new_device_already_
     assert_eq!(
         a.deny_approval(approval).await.err(),
         Some(DeviceError::ApprovalExpired)
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn check_invite_tells_a_good_code_from_a_used_an_expired_and_an_unknown_one() {
+    let server = Server::start_mode(orbyn_core::SignupMode::Invite).await;
+    let device = server.device("Laptop");
+    let pool = server.db.pool();
+    let made = orbyn_core::accounts::invites::create(pool, 3, 14, "check")
+        .await
+        .expect("invites");
+
+    // A good code is fine, however it is typed, and checking spends nothing.
+    assert_eq!(device.check_invite(&made[0].code).await, Ok(()));
+    assert_eq!(
+        device.check_invite(&made[0].code.to_lowercase()).await,
+        Ok(())
+    );
+    assert_eq!(device.check_invite(&made[0].code).await, Ok(()));
+
+    // Unknown, empty, expired and used codes get the same answer.
+    assert_eq!(
+        device.check_invite("ZZZZ-ZZZZ-ZZZZ-ZZZZ").await.err(),
+        Some(DeviceError::InviteInvalid)
+    );
+    assert_eq!(
+        device.check_invite("").await.err(),
+        Some(DeviceError::InviteInvalid)
+    );
+    orbyn_core::sqlx::query(
+        "UPDATE invites SET expires_at = now() - interval '1 day' WHERE short_id = $1",
+    )
+    .bind(&made[1].id)
+    .execute(pool)
+    .await
+    .expect("expire");
+    assert_eq!(
+        device.check_invite(&made[1].code).await.err(),
+        Some(DeviceError::InviteInvalid)
+    );
+    let email = email();
+    let mut pending = device
+        .begin_sign_up(SignUpRequest {
+            email: email.clone(),
+            password: password(),
+            invite: Some(made[2].code.clone()),
+        })
+        .await
+        .expect("begin with the third invite");
+    let code = code_sent_to(pool, &email).await;
+    device
+        .verify_sign_up(&mut pending, &code)
+        .await
+        .expect("verify");
+    let other = server.device("Phone");
+    assert_eq!(
+        other.check_invite(&made[2].code).await.err(),
+        Some(DeviceError::InviteInvalid)
     );
 }
