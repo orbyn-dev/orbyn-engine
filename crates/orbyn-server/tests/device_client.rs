@@ -914,3 +914,48 @@ async fn a_device_whose_name_has_spaces_is_approved_with_matching_digits() {
     assert_eq!(phone.name, "Phone");
     assert_eq!(phone.state, wire::DeviceState::Trusted);
 }
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn the_approver_cannot_confirm_or_deny_an_approval_the_new_device_already_ended() {
+    let server = Server::start().await;
+    let (a, mut engine_a, b, engine_b) = pending_pair(&server).await;
+
+    // Confirm after the new device cancelled: refused by the server, nothing is approved.
+    let mut approval = a
+        .start_approval(&engine_a, &device_id_of(&b))
+        .await
+        .expect("start");
+    let joined = b
+        .join_approval(&engine_b)
+        .await
+        .expect("join")
+        .expect("an approval");
+    assert!(matches!(
+        a.approval_state(&mut approval).await.expect("state"),
+        ApproverState::Digits { .. }
+    ));
+    assert!(a.time_left(&approval).is_some_and(|t| t.as_secs() > 500));
+    b.deny_joined(joined).await.expect("deny");
+    assert_eq!(
+        a.confirm_approval(&mut engine_a, approval).await.err(),
+        Some(DeviceError::ApprovalExpired)
+    );
+    assert_eq!(b.pending_approval().await.expect("current"), None);
+
+    // Deny of an approval that is already over says so.
+    let approval = a
+        .start_approval(&engine_a, &device_id_of(&b))
+        .await
+        .expect("start again");
+    let joined = b
+        .join_approval(&engine_b)
+        .await
+        .expect("join")
+        .expect("an approval");
+    b.deny_joined(joined).await.expect("deny");
+    assert_eq!(
+        a.deny_approval(approval).await.err(),
+        Some(DeviceError::ApprovalExpired)
+    );
+}

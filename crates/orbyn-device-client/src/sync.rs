@@ -52,7 +52,7 @@ pub(crate) fn engine_error(error: ClientError) -> DeviceError {
 }
 
 /// A path segment, percent-encoded: zone names and tokens may hold `:` or `.`.
-fn segment(text: &str) -> String {
+pub(crate) fn segment(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
         match byte {
