@@ -55,6 +55,7 @@ ALLOWED = {
         "orbyn-client",
         "orbyn-contracts",
         "orbyn-crypto",
+        "orbyn-engineering",
         "orbyn-sync",
     },
     "orbyn-engineering": {"orbyn-sync"},

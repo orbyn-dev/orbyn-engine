@@ -160,6 +160,7 @@ The app may not depend on or name `orbyn-contracts` (rule D6). Every type of ano
 | `orbyn-sync` (through `orbyn-client`) | `Fields`, `Stamp` | staging and reading records |
 | `orbyn-crypto` (through `orbyn-client`) | `DeviceKeys`, `DevicePublic` | `StoredIdentity::keys()`, device keys |
 | `zeroize` | `Zeroizing` | `StoredIdentity`, `SecondFactor` |
+| `orbyn-engineering` | `ZONE_SETTINGS` (`engineering.settings`), `PERSON_SETTINGS` (`person_settings`), `PERSON_RECORD_ID` (`person`), `Settings`, `SettingsError`, `Rule`, `Accepted`, `Rejected` | the names the app syncs its settings under, and the type that holds them, so it does not spell them by hand; `orbyn-engineering` does not depend on this crate |
 
 `orbyn-client` re-exports, besides those, the other contract types its `Engine` methods take or return (`ZoneList`, `UploadChanges`, `UploadResult`, `RemoveDevice`, `DeleteZone`, `KeyEnvelope`, `NewKeyEnvelope`, `KeyRotation`, `ApprovalNonce`, `CreateApproval`, `ConfirmApproval`, `ProtectionChain`, `ProtectionLink`, `ProtectionLevel`, `SetProtection`, `Record`, `RecordChanged`, `ZoneChanges`).
 
