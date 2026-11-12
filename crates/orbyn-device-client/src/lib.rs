@@ -39,4 +39,10 @@ pub use orbyn_client::{
     Snapshot, Stamp, Trashed,
 };
 pub use orbyn_contracts::{DeviceRemoval, DeviceState};
+// The names Engineering gives its zone and record, and the settings type that holds them, so the
+// app never spells them by hand. `orbyn-engineering` does not depend on this crate.
+pub use orbyn_engineering::{
+    Accepted, PERSON_RECORD_ID, PERSON_SETTINGS, Rejected, Rule, Settings, SettingsError,
+    ZONE_SETTINGS,
+};
 pub use zeroize::Zeroizing;

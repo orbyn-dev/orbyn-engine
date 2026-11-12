@@ -32,6 +32,8 @@ The **zone-key cache is not here.** The host keeps zone keys in its own sealed s
 
 The result is a `PendingSignUp`. It holds the new device's keys **in memory only**: nothing is stored, and dropping it cancels, so an abandoned sign-up leaves nothing behind. `verify_sign_up(&mut pending, code)` sends the emailed code (any case; spaces and hyphens ignored). A wrong code is `InvalidCode` and leaves the sign-up open; `resend_sign_up` asks for a new one. Only on success are the keys, ids, session and a fresh vault key saved. A store that already holds a device is refused up front (`StoreNotEmpty`), and again before the code is sent, so a sign-in that finished in between is never overwritten and the code is not spent.
 
+`check_invite(code)` asks `POST /v1/invites/check` whether an invite can start a sign-up, before the person types the rest, and spends nothing: `Ok` means yes, an unknown, used or expired code is `InviteInvalid` (one answer for all three), too many wrong tries are `RateLimited`, and a server that asks for no invites says yes to any code. The code goes as typed; the server ignores case, spaces and hyphens.
+
 ### A sign-up that could not be saved
 
 The code is spent when the server accepts it: the account exists from then on. If the key store then fails, `verify_sign_up` returns `DeviceError::Store` and the **keys and the session stay in the `PendingSignUp`**, in memory, wiped on drop. `retry_save(&mut pending)` saves them again and sends nothing to the server, so there is no new code and no second account; calling `verify_sign_up` again does the same whatever code is passed. A store that now holds a device is `StoreNotEmpty`.
@@ -158,6 +160,7 @@ The app may not depend on or name `orbyn-contracts` (rule D6). Every type of ano
 | `orbyn-sync` (through `orbyn-client`) | `Fields`, `Stamp` | staging and reading records |
 | `orbyn-crypto` (through `orbyn-client`) | `DeviceKeys`, `DevicePublic` | `StoredIdentity::keys()`, device keys |
 | `zeroize` | `Zeroizing` | `StoredIdentity`, `SecondFactor` |
+| `orbyn-engineering` | `ZONE_SETTINGS` (`engineering.settings`), `PERSON_SETTINGS` (`person_settings`), `PERSON_RECORD_ID` (`person`), `Settings`, `SettingsError`, `Rule`, `Accepted`, `Rejected` | the names the app syncs its settings under, and the type that holds them, so it does not spell them by hand; `orbyn-engineering` does not depend on this crate |
 
 `orbyn-client` re-exports, besides those, the other contract types its `Engine` methods take or return (`ZoneList`, `UploadChanges`, `UploadResult`, `RemoveDevice`, `DeleteZone`, `KeyEnvelope`, `NewKeyEnvelope`, `KeyRotation`, `ApprovalNonce`, `CreateApproval`, `ConfirmApproval`, `ProtectionChain`, `ProtectionLink`, `ProtectionLevel`, `SetProtection`, `Record`, `RecordChanged`, `ZoneChanges`).
 

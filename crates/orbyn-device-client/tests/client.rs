@@ -759,3 +759,76 @@ async fn retry_save_with_no_spent_code_or_a_store_that_holds_a_device_saves_noth
         "x"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_invite_says_yes_to_a_good_code_and_one_answer_to_every_bad_one() {
+    let engine = FakeEngine::new();
+    let a = client(&engine, "Laptop");
+    // A server that asks for no invites accepts any code.
+    assert_eq!(a.check_invite("anything").await, Ok(()));
+
+    engine.add_invite("ABCD1234");
+    // Case, spaces and hyphens are the server's business; the code goes as typed.
+    assert_eq!(a.check_invite("abcd-1234").await, Ok(()));
+    for bad in ["WRONG-CODE", "", "ABCD12345"] {
+        assert_eq!(
+            a.check_invite(bad).await.err(),
+            Some(DeviceError::InviteInvalid),
+            "{bad:?}"
+        );
+    }
+    // Checking spends nothing and signs nothing up.
+    assert_eq!(a.check_invite("abcd-1234").await, Ok(()));
+    assert_eq!(a.identity().expect("store"), None);
+    let sent: Vec<_> = engine
+        .log()
+        .into_iter()
+        .filter(|(path, _)| path.contains("invites/check"))
+        .collect();
+    assert_eq!(sent.len(), 6);
+    assert!(sent.iter().any(|(_, body)| body.contains("abcd-1234")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_invite_maps_a_limit_and_a_dead_network() {
+    struct Status(u16, Option<u64>);
+    impl DeviceApi for Status {
+        async fn send(&self, _: Request) -> Result<Response, DeviceError> {
+            match self.0 {
+                0 => Err(DeviceError::Transport),
+                status => Ok(Response {
+                    status,
+                    retry_after: self.1,
+                    body: Zeroizing::new(br#"{"code":"too_many_attempts","message":"x"}"#.to_vec()),
+                }),
+            }
+        }
+    }
+    let config = || ClientConfig {
+        device_name: "Laptop".to_owned(),
+        platform: DevicePlatform::Linux,
+        app: None,
+    };
+    let limited = DeviceClient::new(
+        Status(429, Some(30)),
+        MemoryStore::new(),
+        SharedClock(Arc::new(AtomicI64::new(0))),
+        config(),
+    );
+    assert_eq!(
+        limited.check_invite("X").await.err(),
+        Some(DeviceError::RateLimited {
+            retry_after: Some(Duration::from_secs(30))
+        })
+    );
+    let offline = DeviceClient::new(
+        Status(0, None),
+        MemoryStore::new(),
+        SharedClock(Arc::new(AtomicI64::new(0))),
+        config(),
+    );
+    assert_eq!(
+        offline.check_invite("X").await.err(),
+        Some(DeviceError::Transport)
+    );
+}

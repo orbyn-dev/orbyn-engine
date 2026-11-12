@@ -1886,6 +1886,7 @@ dependencies = [
  "orbyn-client",
  "orbyn-contracts",
  "orbyn-crypto",
+ "orbyn-engineering",
  "orbyn-sync",
  "reqwest",
  "serde",

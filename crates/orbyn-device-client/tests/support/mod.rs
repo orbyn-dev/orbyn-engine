@@ -254,6 +254,20 @@ impl FakeEngine {
         match (request.method, request.path.as_str()) {
             (Method::Post, "/v1/accounts/register/start") => register_start(&mut s, &body),
             (Method::Post, "/v1/accounts/register/finish") => register_finish(&mut s, body),
+            (Method::Post, "/v1/invites/check") => {
+                // As the server: any code is fine when invites are not asked for; else a known,
+                // unused one (ignoring case, spaces and hyphens).
+                let code = body["invite"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .replace(['-', ' '], "")
+                    .to_uppercase();
+                if s.invites.is_empty() || s.invites.contains(&code) {
+                    answer(204, Value::Null)
+                } else {
+                    error(400, "invite_invalid")
+                }
+            }
             (Method::Post, "/v1/accounts/email/verify") => email_verify(&mut s, &body, now),
             (Method::Post, "/v1/accounts/email/resend") => answer(204, Value::Null),
             (Method::Post, "/v1/sessions/login/start") => login_start(&mut s, &body, now),
