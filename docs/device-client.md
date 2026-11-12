@@ -84,6 +84,8 @@ An error never carries a password, a token, a code, a key or a URL. `Request` an
 
 `HttpApi` is reqwest with **rustls and ring only** (no OpenSSL, no aws-lc). **No proxy is used, whatever `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` or `NO_PROXY` say** (reqwest reads them by default and does not exempt loopback, so the bearer token would reach the proxy); **Redirects are off**: a redirect could carry the bearer token elsewhere, and a redirect is returned as an answer. The address must be `https`, or `http` to a **loopback IP literal** (`127.0.0.1`, `[::1]`) for a local stack, with no user info, query or path. A name such as `localhost` is not a loopback literal, because a name can be made to point anywhere. `is_loopback_literal(address)` is public so the app's "local only" gate can use the same test. Calls time out at 30 seconds, connects at 10, and a response body is capped at 32 MiB (`with_body_limit` lowers it), counted **while reading**, so a server that sends no `Content-Length`, or lies about it, is stopped too.
 
+**Known limit (beta).** The client never uses `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY`. A machine that reaches the engine only through a proxy cannot use the account until an explicit proxy option exists. That option is an Engine setting plus an app control and is never read from the environment. It is scheduled after the beta and before open sign-up.
+
 ## Tests
 
 - `tests/no_proxy.rs` runs the test binary again as a child with `HTTP_PROXY`, `ALL_PROXY` and `HTTPS_PROXY` set (and a `NO_PROXY` that does not name the engine) to a second listener, sends one authenticated request to a loopback engine and checks that the proxy gets no connection and the engine gets the request.
