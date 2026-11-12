@@ -42,6 +42,8 @@ struct State {
     ended: bool,
     expires_at: String,
     approved: bool,
+    /// Reads of the approval that fail with the network once the server holds our nonce.
+    get_fails: usize,
     /// What the server shows as the commitment, when it lies about it.
     commitment: Option<String>,
     log: Vec<String>,
@@ -102,6 +104,10 @@ impl DeviceApi for Script {
                 if s.ended {
                     return gone();
                 }
+                if s.approver_nonce.is_some() && s.get_fails > 0 {
+                    s.get_fails -= 1;
+                    return Err(DeviceError::Transport);
+                }
                 let create = s.create.clone().expect("created first");
                 answer(
                     200,
@@ -120,6 +126,11 @@ impl DeviceApi for Script {
                     }),
                 )
             }
+            // The server takes the nonce once, as the real one does.
+            (Method::Post, _) if step == "reveal" && s.approver_nonce.is_some() => answer(
+                409,
+                json!({"code": "approval_out_of_order", "message": "x"}),
+            ),
             (Method::Post, _) if step == "reveal" => match s.reveal {
                 Reveal::NetworkFails(n) if n > 0 => {
                     s.reveal = Reveal::NetworkFails(n - 1);
@@ -193,6 +204,7 @@ fn setup(reveal: Reveal) -> (Client, Engine) {
                 ended: false,
                 expires_at: EXPIRES.to_owned(),
                 approved: false,
+                get_fails: 0,
                 commitment: None,
                 log: Vec::new(),
             }),
@@ -370,4 +382,38 @@ async fn a_view_that_does_not_match_what_this_device_started_cancels_the_approva
     );
     assert_eq!(count(&client, "reveal"), 0, "nothing was revealed");
     assert_eq!(count(&client, "cancel"), 1, "a real mismatch cancels");
+}
+
+#[tokio::test]
+async fn a_lost_reveal_answer_and_a_failed_read_do_not_leave_the_approver_stuck() {
+    let (client, engine) = setup(Reveal::AnswerLostOnce);
+    let mut approval = started(&client, &engine).await;
+    // The reveal reaches the server and the answer is lost; the two reads that ask whether the
+    // server holds the nonce fail as well, and the second send is answered 409.
+    client.api().state.lock().expect("lock").get_fails = 2;
+    assert_eq!(
+        client.approval_state(&mut approval).await.err(),
+        Some(DeviceError::ApprovalNotReady)
+    );
+    assert_eq!(count(&client, "cancel"), 0);
+    // The next call asks first, finds the nonce held and shows the digits: it does not send again.
+    let state = client
+        .approval_state(&mut approval)
+        .await
+        .expect("recovers");
+    assert!(matches!(state, ApproverState::Digits { .. }));
+    assert_eq!(count(&client, "reveal"), 2, "the third send never happened");
+    assert_eq!(count(&client, "cancel"), 0);
+}
+
+#[tokio::test]
+async fn a_409_after_a_lost_answer_is_settled_by_asking_the_server() {
+    let (client, engine) = setup(Reveal::AnswerLostOnce);
+    let mut approval = started(&client, &engine).await;
+    // One failed read: the second send is answered 409, and the read that follows finds the nonce.
+    client.api().state.lock().expect("lock").get_fails = 1;
+    let state = client.approval_state(&mut approval).await.expect("state");
+    assert!(matches!(state, ApproverState::Digits { .. }));
+    assert_eq!(count(&client, "reveal"), 2);
+    assert_eq!(count(&client, "cancel"), 0);
 }

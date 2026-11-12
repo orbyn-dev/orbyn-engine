@@ -200,8 +200,10 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
                     }
                 },
             };
+            // A reveal kept from an earlier try may have reached the server: ask before sending.
+            let resend = approval.unsent_reveal.is_some();
             approval.unsent_reveal = Some(reveal.clone());
-            self.send_reveal(&id, &reveal).await?;
+            self.send_reveal(&id, &reveal, resend).await?;
             approval.revealed = true;
             approval.unsent_reveal = None;
         }
@@ -215,11 +217,30 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
         })
     }
 
+    /// Whether the server already holds this reveal: its view of the approval shows our nonce.
+    async fn server_holds(&self, id: &str, reveal: &wire::ApprovalNonce) -> bool {
+        self.authed(Method::Get, &Self::approval_path(id, None), None)
+            .await
+            .ok()
+            .and_then(|r| parse::<wire::PendingApproval>(&r.body).ok())
+            .is_some_and(|v| v.approver_nonce.as_deref() == Some(&reveal.nonce))
+    }
+
     /// Sends the reveal, again if the network fails. A failure never cancels the approval: this
-    /// device's nonce may have arrived, so before sending again the server is asked whether it
-    /// holds it. Only an answer from the server that refuses the reveal ends the approval, and the
+    /// device's nonce may have arrived, and the server takes it once (a second send is 409
+    /// `approval_out_of_order`). So the server is asked whether it holds the nonce before a kept
+    /// reveal is sent again (`resend`), after a network failure, and after that 409; "held" counts
+    /// as sent. Only an answer from the server that refuses the reveal ends the approval, and the
     /// server does that itself.
-    async fn send_reveal(&self, id: &str, reveal: &wire::ApprovalNonce) -> Result<(), DeviceError> {
+    async fn send_reveal(
+        &self,
+        id: &str,
+        reveal: &wire::ApprovalNonce,
+        resend: bool,
+    ) -> Result<(), DeviceError> {
+        if resend && self.server_holds(id, reveal).await {
+            return Ok(());
+        }
         let mut last = DeviceError::Transport;
         for _ in 0..REVEAL_TRIES {
             let sent = self
@@ -231,17 +252,15 @@ impl<A: DeviceApi, S: KeyStore, C: Clock> DeviceClient<A, S, C> {
                 .await;
             match sent {
                 Ok(_) => return Ok(()),
-                Err(DeviceError::Transport) => {
-                    last = DeviceError::Transport;
-                    let held = self
-                        .authed(Method::Get, &Self::approval_path(id, None), None)
-                        .await
-                        .ok()
-                        .and_then(|r| parse::<wire::PendingApproval>(&r.body).ok())
-                        .is_some_and(|v| v.approver_nonce.as_deref() == Some(&reveal.nonce));
-                    if held {
+                Err(error @ (DeviceError::Transport | DeviceError::ApprovalNotReady)) => {
+                    if self.server_holds(id, reveal).await {
                         return Ok(());
                     }
+                    if error == DeviceError::ApprovalNotReady {
+                        // Not held and still out of order: it is not ours to retry.
+                        return Err(error);
+                    }
+                    last = error;
                 }
                 Err(other) => return Err(other),
             }

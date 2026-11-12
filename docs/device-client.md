@@ -138,7 +138,7 @@ loop {
 ```
 
 - **Expired, answered or given up.** An approval that expired, was cancelled or answered by either device, or was used gives `DeviceError::ApprovalExpired` from `approval_state`, `confirm_approval` and `deny_approval`, and nothing is approved: the server refuses a confirm after the end, and a deny reads the approval first so it sends no second cancel. Show it as "this request ended" and start a new one if the person still wants it.
-- **A network failure is not an answer.** The reveal is sent up to three times and, before each repeat, the server is asked whether it already holds it; a failure that outlasts the tries is `DeviceError::Transport` and leaves the approval open, so call `approval_state` again. Only a real mismatch (other keys, another commitment) cancels it.
+- **A network failure is not an answer.** The reveal is sent up to three times. The server takes it once (a second send is a 409), so it is asked whether it already holds it before a kept reveal is sent again, after a network failure and after that 409, and "held" counts as sent; a failure that outlasts the tries is `DeviceError::Transport` and leaves the approval open, so call `approval_state` again. Only a real mismatch (other keys, another commitment) cancels it.
 - **Time left.** `time_left(&approval)` is the server's expiry (from `start_approval`, refreshed by each `approval_state`) minus this device's clock, zero once passed and `None` when the time could not be read. It is a display hint: the server decides.
 - **Deny carries no reason yet.** `deny_approval` ends the approval and says nothing more to the new device; a reason would need a wire change.
 - `ApproverState`'s `Debug` prints `Digits { .. }`: the digits and the fingerprint are never in a log line.
