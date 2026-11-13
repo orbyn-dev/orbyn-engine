@@ -88,10 +88,10 @@ It does not trust its own rows for time. A recovery's 72 hours are measured from
     - transparency-log heads;
     - recovery approvals.
   - **Certification.** The key service signs a service key only one it generated inside the HSM in the same call. It has no API that takes a key to sign.
-- **Account service key.** One X25519 pair per Standard account, generated in the HSM when the account first signs Standard.
+- **Account service key.** One P-256 pair per Standard account, generated in the HSM when the account first signs Standard.
   - The private key leaves the HSM only wrapped under the key-encryption key (`CKM_AES_KEY_WRAP_PAD`, the AES key wrap with padding of RFC 5649, which is KWP; SoftHSM 2.6 has no mechanism by the name `CKM_AES_KEY_WRAP_KWP`, and a cloud HSM that offers it under that name can be configured to use it), stored in the key service's schema.
   - To open envelopes, it is unwrapped back into the HSM as a non-extractable session object and destroyed afterwards.
-- **Service envelopes.** These use the device envelope format (`orbyn_crypto::wrap_key`) with the service public key as the recipient and the same label (`orbyn/zone-key/v1`, account, zone, key id).
+- **Service envelopes.** These use the service-envelope suite (`orbyn_crypto::wrap_key_p256`): a P-256 ECDH to the compressed service public key, signed by the sending device, under the same label (`orbyn/zone-key/v1`, account, zone, key id). Each names the SHA-256 of the certification statement it was sealed against, so it opens only against the exact certified key. Not the device envelope format (`orbyn_crypto::wrap_key`, X25519): the two suites are never told apart by their bytes, and only the store's recipient kind says which one a row holds.
   - `key_envelopes` gains a recipient kind, `device` or `service`.
   - The 5000-envelope cap and the replace-on-retry rule apply per recipient.
 - **Opening one.**
@@ -115,7 +115,7 @@ It does not trust its own rows for time. A recovery's 72 hours are measured from
 ## Writing service envelopes
 
 - When a device sends envelopes for a key (creation, rotation, approval), it also sends one to the service recipient in the same all-or-nothing batch. It does this only if its verified setting is Standard and it holds a verified service key.
-- A device gets the service key from `GET /v1/keychain/service-key` and verifies the identity signature, then the transparency log (`orbyn_client::verify_service_key`, slice 8d). If either fails, the device does not escrow and reports the failure.
+- A device gets the service key from `GET /v1/keychain/service-key` and verifies the identity signature, then the transparency log (`orbyn_client::verify_service_key`, slice 8d); it seals the zone keys to it with `orbyn_client::service_envelopes_for` (slice 8e). If either the signature or the log check fails, the device does not escrow and reports the failure.
 - **Backfill** runs only for accounts whose verified setting is Standard. That covers new accounts, and accounts after the person turns Standard on.
   - Each trusted device sends service envelopes for keys that lack one, at most 100 per batch.
   - The server answers which (zone, key id) pairs are missing.

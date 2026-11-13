@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::{Value, json};
 
-const ACCOUNT: &str = "11111111-2222-4333-8444-555555555555";
+pub(crate) const ACCOUNT: &str = "11111111-2222-4333-8444-555555555555";
 const A: &str = "0000000a-0000-4000-8000-00000000000a";
 const B: &str = "0000000b-0000-4000-8000-00000000000b";
 const SECRET: [u8; 32] = [42; 32];
@@ -265,8 +265,9 @@ fn two_engines_sync_an_item_through_json() -> Result<()> {
     assert_eq!(unb64(&get(&removal, "signature"))?.len(), 64);
 
     a.create_zone_key("inbox")?;
-    let put: Value = serde_json::from_str(&a.envelopes_for("inbox", &with_stranger.to_string())?)
-        .map_err(|e| error("invalid_json", e))?;
+    let put: Value =
+        serde_json::from_str(&a.envelopes_for("inbox", &with_stranger.to_string(), None)?)
+            .map_err(|e| error("invalid_json", e))?;
     assert_eq!(put["envelopes"].as_array().map(Vec::len), Some(1));
     let delivered = json!({"envelopes": [{
         "sender_device_id": A,

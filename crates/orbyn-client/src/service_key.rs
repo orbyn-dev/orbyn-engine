@@ -142,6 +142,64 @@ pub enum ServiceKeyRefusal {
     OfferedNotNewest,
 }
 
+impl ServiceKeyRefusal {
+    /// A stable code for a host to branch on (never the message). Each one is one refusal, so a
+    /// host can log it, show it or test it without parsing prose.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Log(refusal) => match refusal {
+                log::Refusal::UnpinnedLogKey => "unpinned_log_key",
+                log::Refusal::TooManyCosignatures => "too_many_cosignatures",
+                log::Refusal::BadLogSignature => "bad_log_signature",
+                log::Refusal::NotEnoughWitnesses => "not_enough_witnesses",
+                log::Refusal::StaleHead => "stale_head",
+                log::Refusal::HeadFromTheFuture => "head_from_the_future",
+                log::Refusal::Rollback => "log_rollback",
+                log::Refusal::Fork => "log_fork",
+                log::Refusal::BadConsistency => "bad_consistency",
+                log::Refusal::BadMapProof => "bad_map_proof",
+                log::Refusal::KeyAbsent => "key_absent",
+                log::Refusal::ChainIncomplete => "chain_incomplete",
+                log::Refusal::EntryEncoding => "entry_encoding",
+                log::Refusal::NotInLog => "not_in_log",
+                log::Refusal::WrongChain => "wrong_chain",
+                log::Refusal::ChainBroken => "chain_broken",
+                log::Refusal::ValueMismatch => "value_mismatch",
+            },
+            Self::Malformed => "malformed",
+            Self::WrongAccount => "wrong_account",
+            Self::HeadsDiffer => "heads_differ",
+            Self::NeedsConsistency { .. } => "needs_consistency",
+            Self::ForeignCertification => "foreign_certification",
+            Self::VersionNotNewer => "version_not_newer",
+            Self::CertifiedAfterRetirement => "certified_after_retirement",
+            Self::KeyChanged => "key_changed",
+            Self::TooManyPages => "too_many_pages",
+            Self::ClockAhead => "clock_ahead",
+            Self::NotCertified => "not_certified",
+            Self::Retired => "retired",
+            Self::UnpinnedIdentity => "unpinned_identity",
+            Self::BadIdentitySignature => "bad_identity_signature",
+            Self::OfferedNotNewest => "offered_not_newest",
+        }
+    }
+
+    /// Whether a host shows a possible-takeover warning: the refusals that say the account's key
+    /// or the log is wrong. The others are not verdicts about the account — `ClockAhead` is about
+    /// the device's clock, and `Malformed`, `HeadsDiffer`, `NeedsConsistency` and `TooManyPages`
+    /// are answers to fetch again — so none of them escrows or warns of a takeover.
+    pub fn is_takeover(&self) -> bool {
+        !matches!(
+            self,
+            Self::Malformed
+                | Self::HeadsDiffer
+                | Self::NeedsConsistency { .. }
+                | Self::TooManyPages
+                | Self::ClockAhead
+        )
+    }
+}
+
 fn unhex<const N: usize>(text: &str) -> Option<[u8; N]> {
     if text.len() != N * 2 || !text.is_ascii() {
         return None;
@@ -604,6 +662,24 @@ mod tests {
                 self.now,
             )
         }
+    }
+
+    #[test]
+    fn a_refusal_names_a_stable_code_and_whether_it_warns_of_a_takeover() {
+        assert_eq!(ServiceKeyRefusal::KeyChanged.code(), "key_changed");
+        assert!(ServiceKeyRefusal::KeyChanged.is_takeover());
+        assert_eq!(
+            ServiceKeyRefusal::Log(log::Refusal::Fork).code(),
+            "log_fork"
+        );
+        assert!(ServiceKeyRefusal::Log(log::Refusal::Fork).is_takeover());
+        // Not verdicts about the account: the device's clock, or answers to fetch again.
+        assert_eq!(ServiceKeyRefusal::ClockAhead.code(), "clock_ahead");
+        assert!(!ServiceKeyRefusal::ClockAhead.is_takeover());
+        assert!(!ServiceKeyRefusal::NeedsConsistency { from: 1, to: 2 }.is_takeover());
+        assert!(!ServiceKeyRefusal::HeadsDiffer.is_takeover());
+        assert!(!ServiceKeyRefusal::Malformed.is_takeover());
+        assert!(!ServiceKeyRefusal::TooManyPages.is_takeover());
     }
 
     #[test]
