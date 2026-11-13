@@ -265,9 +265,8 @@ fn two_engines_sync_an_item_through_json() -> Result<()> {
     assert_eq!(unb64(&get(&removal, "signature"))?.len(), 64);
 
     a.create_zone_key("inbox")?;
-    let put: Value =
-        serde_json::from_str(&a.envelopes_for("inbox", &with_stranger.to_string(), None)?)
-            .map_err(|e| error("invalid_json", e))?;
+    let put: Value = serde_json::from_str(&a.envelopes_for("inbox", &with_stranger.to_string())?)
+        .map_err(|e| error("invalid_json", e))?;
     assert_eq!(put["envelopes"].as_array().map(Vec::len), Some(1));
     let delivered = json!({"envelopes": [{
         "sender_device_id": A,

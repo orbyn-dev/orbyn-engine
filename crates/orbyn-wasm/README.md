@@ -97,15 +97,15 @@ Clearing the site's data (or the browser's storage for it) deletes the sealed de
 - `applyChanges(zone, zoneChangesJson, now)` (and `applyChangesFrom(zone, since, zoneChangesJson, now)`, required while a zone is refetched after `tokenExpired`): returns `{changed, removed, trashed, quarantined, unverified_deletes, rejected, more}`.
 - `retryQuarantined(zone, now)` after new keys arrive; `trash(zone)` and `takeFromTrash(zone, id)`.
 - `checkZones(zoneListJson)`: returns `{stale, next}`; follow `next` as `?after=`.
-- Devices and keys: `verifyDevices(deviceListJson)` (the ids this device trusts: its approver, the devices that approver endorsed, and their approval chains, minus signed removals), `pinDevice(id, signingKey, agreementKey)`, `createZoneKey(zone)`, `rotateZoneKey(zone)`, `envelopesFor(zone, deviceListJson, serviceCertJson?)` (a `PutKeyEnvelopes`, only to verified devices; with a verified `ServiceKeyCertification`, `service_envelopes` also seals every key of the zone to the account's service key), `acceptEnvelopes(keyEnvelopeListJson, deviceListJson)`, `serviceEnvelopesFor(zone, serviceCertJson)` (the `NewServiceEnvelope[]` for the pairs `GET /v1/keychain/service-missing` lists), `verifyServiceKey(inputJson)` (the service-key check, below).
+- Devices and keys: `verifyDevices(deviceListJson)` (the ids this device trusts: its approver, the devices that approver endorsed, and their approval chains, minus signed removals), `pinDevice(id, signingKey, agreementKey)`, `createZoneKey(zone)`, `rotateZoneKey(zone)`, `envelopesFor(zone, deviceListJson)` (a `PutKeyEnvelopes`, only to verified devices; once a service key is verified, `service_envelopes` also seals every key of the zone to it), `acceptEnvelopes(keyEnvelopeListJson, deviceListJson)`, `serviceEnvelopesFor(zone)` (the `NewServiceEnvelope[]` for the pairs `GET /v1/keychain/service-missing` lists), `verifyServiceKey(inputJson)` (the service-key check, below; a method, so the verified key stays inside the engine instance).
 - `itemToFields(itemJson, beforeJson?, stampJson)` and `itemFromFields(id, fieldsJson)`.
 
 ## Service key check
 
-`verifyServiceKey(inputJson)` checks the account's service key against the transparency log, for a host that fetched the answers from the key service's public API (never through the record server). It keeps nothing itself: store `verified.public_key` and `verified.seen` and pass them back next time.
+`engine.verifyServiceKey(inputJson)` checks the account's service key against the transparency log, for a host that fetched the answers from the key service's public API (never through the record server). On `verified` the engine keeps the key: from then on `envelopesFor` adds `service_envelopes` sealed to it and `serviceEnvelopesFor` returns them, and neither takes a certification. Store `verified.public_key` and `verified.seen` and pass them back next time; a restored engine holds no key until it verifies again, and once it holds one, an omitted `known_key` or `seen` falls back to that key and head rather than to trust on first use or a rolled-back head.
 
 ```js
-const out = JSON.parse(verifyServiceKey(JSON.stringify({
+const out = JSON.parse(engine.verifyServiceKey(JSON.stringify({
   pins: {
     log_keys: [{ version: 1, key: "…" }],       // base64url, 32 bytes
     witnesses: ["…", "…"],                       // base64url, 32 bytes
@@ -125,9 +125,9 @@ const out = JSON.parse(verifyServiceKey(JSON.stringify({
 }));
 ```
 
-`out.verified` holds `{identity_version, public_key, statement_hash, entry_index, seen}`, and only then may the device escrow: `envelopesFor(zone, devices, certification)` or `serviceEnvelopesFor(zone, certification)`. `out.refusal` holds `{code, takeover, message}`:
+`out.verified` holds `{identity_version, public_key, statement_hash, entry_index, seen}`, and only then does the engine escrow: `envelopesFor(zone, devices)` includes `service_envelopes`, and `serviceEnvelopesFor(zone)` returns them. `out.refusal` holds `{code, takeover, message}`:
 
 - `takeover: true`: the account's key or the log is wrong, so show a possible-takeover warning. `key_changed` is a different key for the account than the one already verified; the rest are log verdicts (`log_fork`, `log_rollback`, `bad_identity_signature`, `offered_not_newest`, …).
 - `takeover: false`: not a verdict about the account. `clock_ahead` asks the person to check the device's clock; `needs_consistency` fetches the consistency proof and asks again; `heads_differ`, `too_many_pages` and `malformed` mean the answers were wrong or incomplete, so fetch them again.
 
-A failed fetch, or a 503 `no_published_head` from `GET /v1/keychain/service-key`, is availability: do not call this and send no envelopes yet. Handing `envelopesFor` or `serviceEnvelopesFor` a certification whose statement hash is not of this account and key throws `service_key_mismatch`.
+A failed fetch, or a 503 `no_published_head` from `GET /v1/keychain/service-key`, is availability: do not call this and send no envelopes yet. `serviceEnvelopesFor` with nothing verified throws `service_key_not_verified` instead of sealing; `envelopesFor` still sends the device envelopes and leaves `service_envelopes` out.

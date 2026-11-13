@@ -13,6 +13,7 @@ impl Engine {
             clock: Clock::new(stamp_device(&me)),
             trust: Trust::new(account, device_id.to_owned(), me),
             protection: protection::Protection::default(),
+            service_key: None,
             keys,
             zones: BTreeMap::new(),
             skipped_future_stamps: 0,
@@ -119,6 +120,11 @@ impl Engine {
 
     pub fn device_keys(&self) -> &DeviceKeys {
         &self.keys
+    }
+
+    /// The account this engine belongs to.
+    pub fn account(&self) -> [u8; 16] {
+        self.trust.account
     }
 
     pub fn device_id(&self) -> &str {

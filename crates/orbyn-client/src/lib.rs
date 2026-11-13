@@ -114,9 +114,10 @@ pub enum ClientError {
     /// The answer does not match the upload
     #[error("the answer does not match the upload")]
     Mismatch,
-    /// A certification's statement hash is not the hash of this account's and key's statement.
-    #[error("the certification is not for this account and key")]
-    ServiceKeyMismatch,
+    /// This engine holds no service key that `verify_service_key` accepted, so it must not seal a
+    /// zone key to one.
+    #[error("the service key has not been verified by this engine")]
+    ServiceKeyNotVerified,
     #[error("a key, id or device in the input is not valid")]
     InvalidInput,
     #[error("the system random source failed")]
@@ -441,6 +442,9 @@ pub struct Engine {
     keys: DeviceKeys,
     trust: Trust,
     protection: protection::Protection,
+    /// The account's service key this engine verified against the transparency log, if any. The
+    /// only key [`Engine::service_envelopes_for`] will seal a zone key to.
+    service_key: Option<VerifiedServiceKey>,
     clock: Clock,
     zones: BTreeMap<String, ZoneState>,
     /// Records whose newest stamp was more than an hour ahead of the clock when

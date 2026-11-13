@@ -11,9 +11,7 @@
 //! host shows a possible-takeover warning, asks the person about their clock, or fetches again.
 
 use super::*;
-use orbyn_client::{
-    LogAnswers, Pins, Seen, ServiceKeyPins, VerifiedServiceKey, verify_service_key as check,
-};
+use orbyn_client::{LogAnswers, Pins, Seen, ServiceKeyPins, VerifiedServiceKey};
 use serde::Deserialize;
 
 /// A pinned key, by the version it was published under.
@@ -186,50 +184,56 @@ fn key33(text: &str) -> Result<[u8; 33]> {
         .map_err(|_| error("invalid_input", "a service key is 33 bytes"))
 }
 
-/// Checks the account's service key against the log; returns `{verified}` or `{refusal}`. The
-/// device escrows a zone key to the service key only when `verified` is present.
-#[wasm_bindgen(js_name = verifyServiceKey)]
-pub fn verify_service_key(input_json: &str) -> Result<String> {
-    let input: CheckJson = parse(input_json)?;
-    let pins = input.pins.into_pins()?;
-    let account = uuid_bytes(&input.account_id)?;
-    let known = match &input.known_key {
-        Some(text) => Some(key33(text)?),
-        None => None,
-    };
-    let seen = input.seen.as_ref().map(SeenJson::to_seen).transpose()?;
-    let pages: Vec<&str> = input
-        .answers
-        .entry_pages
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let answers = LogAnswers {
-        lookup: &input.answers.lookup,
-        entry_pages: &pages,
-        consistency: input.answers.consistency.as_deref(),
-    };
-    let verdict = match check(
-        &pins,
-        account,
-        &input.offered,
-        &answers,
-        known.as_ref(),
-        seen.as_ref(),
-        millis(input.now),
-    ) {
-        Ok(verified) => VerdictJson {
-            verified: Some(verified.into()),
-            refusal: None,
-        },
-        Err(refusal) => VerdictJson {
-            verified: None,
-            refusal: Some(RefusalJson {
-                code: refusal.code(),
-                takeover: refusal.is_takeover(),
-                message: refusal.to_string(),
-            }),
-        },
-    };
-    to_json(&verdict)
+/// Checks the account's service key against the log; returns `{verified}` or `{refusal}`. On
+/// `verified` the engine keeps the key, and only that key can receive escrow envelopes from then
+/// on ([`SyncEngine::service_envelopes_for`] and `envelopesFor`).
+#[wasm_bindgen]
+impl SyncEngine {
+    #[wasm_bindgen(js_name = verifyServiceKey)]
+    pub fn verify_service_key(&mut self, input_json: &str) -> Result<String> {
+        let input: CheckJson = parse(input_json)?;
+        let pins = input.pins.into_pins()?;
+        let account = uuid_bytes(&input.account_id)?;
+        if account != self.engine.account() {
+            return Err(error("invalid_input", "the account is not this engine's"));
+        }
+        let known = match &input.known_key {
+            Some(text) => Some(key33(text)?),
+            None => None,
+        };
+        let seen = input.seen.as_ref().map(SeenJson::to_seen).transpose()?;
+        let pages: Vec<&str> = input
+            .answers
+            .entry_pages
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let answers = LogAnswers {
+            lookup: &input.answers.lookup,
+            entry_pages: &pages,
+            consistency: input.answers.consistency.as_deref(),
+        };
+        let verdict = match self.engine.verify_service_key(
+            &pins,
+            &input.offered,
+            &answers,
+            known.as_ref(),
+            seen.as_ref(),
+            millis(input.now),
+        ) {
+            Ok(verified) => VerdictJson {
+                verified: Some(verified.into()),
+                refusal: None,
+            },
+            Err(refusal) => VerdictJson {
+                verified: None,
+                refusal: Some(RefusalJson {
+                    code: refusal.code(),
+                    takeover: refusal.is_takeover(),
+                    message: refusal.to_string(),
+                }),
+            },
+        };
+        to_json(&verdict)
+    }
 }

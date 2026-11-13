@@ -92,14 +92,15 @@ fn b64(bytes: &[u8]) -> String {
 
 #[test]
 fn the_service_key_check_answers_a_host_through_json() -> Result<()> {
+    let keys = DeviceKeys::create()?;
+    let mut engine = SyncEngine::create(&keys, ACCOUNT, "0000000a-0000-4000-8000-00000000000a")?;
     let service = orbyn_crypto::P256Keys::generate()?;
     let (input, head, hash) = service_key_world(&service);
 
     // The first check is trust on first use: a key the log agrees with is accepted, and the host
     // stores the key and the head to pass back next time.
-    let verdict: Value =
-        serde_json::from_str(&crate::service_key::verify_service_key(&input.to_string())?)
-            .map_err(|e| error("invalid_json", e))?;
+    let verdict: Value = serde_json::from_str(&engine.verify_service_key(&input.to_string())?)
+        .map_err(|e| error("invalid_json", e))?;
     let verified = &verdict["verified"];
     assert_eq!(
         verified["public_key"],
@@ -114,18 +115,15 @@ fn the_service_key_check_answers_a_host_through_json() -> Result<()> {
     let mut again = input.clone();
     again["known_key"] = verified["public_key"].clone();
     again["seen"] = verified["seen"].clone();
-    let verdict: Value =
-        serde_json::from_str(&crate::service_key::verify_service_key(&again.to_string())?)
-            .map_err(|e| error("invalid_json", e))?;
+    let verdict: Value = serde_json::from_str(&engine.verify_service_key(&again.to_string())?)
+        .map_err(|e| error("invalid_json", e))?;
     assert!(verdict.get("verified").is_some());
 
     // A different key for the account is the takeover the log alone cannot show, and it warns.
     let mut changed = input.clone();
     changed["known_key"] = json!(b64(&[3; 33]));
-    let verdict: Value = serde_json::from_str(&crate::service_key::verify_service_key(
-        &changed.to_string(),
-    )?)
-    .map_err(|e| error("invalid_json", e))?;
+    let verdict: Value = serde_json::from_str(&engine.verify_service_key(&changed.to_string())?)
+        .map_err(|e| error("invalid_json", e))?;
     assert_eq!(verdict["refusal"]["code"], json!("key_changed"));
     assert_eq!(verdict["refusal"]["takeover"], json!(true));
     assert!(verdict.get("verified").is_none());
@@ -134,8 +132,54 @@ fn the_service_key_check_answers_a_host_through_json() -> Result<()> {
     let mut bad = input;
     bad["seen"] = json!({"size": 1, "log_root": "zz", "service_map_root": "00", "identity_map_root": "00", "witnessed_ms": 0});
     assert_eq!(
-        crate::service_key::verify_service_key(&bad.to_string()).map_err(|e| e.code),
+        engine
+            .verify_service_key(&bad.to_string())
+            .map_err(|e| e.code),
         Err("invalid_input")
     );
+    Ok(())
+}
+
+#[test]
+fn escrow_uses_only_the_key_the_engine_verified() -> Result<()> {
+    let keys = DeviceKeys::create()?;
+    let mut engine = SyncEngine::create(&keys, ACCOUNT, "0000000a-0000-4000-8000-00000000000a")?;
+    engine.create_zone_key("inbox")?;
+    let no_devices = json!({"devices": [], "next": null}).to_string();
+
+    // With nothing verified, asking for the escrow envelopes is a coded refusal.
+    assert_eq!(
+        engine.service_envelopes_for("inbox").map_err(|e| e.code),
+        Err("service_key_not_verified")
+    );
+
+    // Device envelopes still work: escrow is opt-in, not a prerequisite for syncing.
+    let put: Value = serde_json::from_str(&engine.envelopes_for("inbox", &no_devices)?)
+        .map_err(|e| error("invalid_json", e))?;
+    assert_eq!(put["envelopes"], json!([]));
+    assert!(put.get("service_envelopes").is_none_or(Value::is_null));
+
+    // Once the engine has verified a key, the envelopes name that key's statement and are
+    // included in the same put.
+    let service = orbyn_crypto::P256Keys::generate()?;
+    let (input, _, hash) = service_key_world(&service);
+    let verdict: Value = serde_json::from_str(&engine.verify_service_key(&input.to_string())?)
+        .map_err(|e| error("invalid_json", e))?;
+    assert!(verdict.get("verified").is_some());
+
+    let envelopes: Value = serde_json::from_str(&engine.service_envelopes_for("inbox")?)
+        .map_err(|e| error("invalid_json", e))?;
+    assert_eq!(envelopes.as_array().map(Vec::len), Some(1));
+    assert_eq!(envelopes[0]["zone"], json!("inbox"));
+    assert_eq!(envelopes[0]["statement_hash"], json!(b64(&hash)));
+
+    let put: Value = serde_json::from_str(&engine.envelopes_for("inbox", &no_devices)?)
+        .map_err(|e| error("invalid_json", e))?;
+    let included = put["service_envelopes"]
+        .as_array()
+        .expect("service envelopes");
+    assert_eq!(included.len(), 1);
+    assert_eq!(included[0]["zone"], json!("inbox"));
+    assert_eq!(included[0]["statement_hash"], json!(b64(&hash)));
     Ok(())
 }

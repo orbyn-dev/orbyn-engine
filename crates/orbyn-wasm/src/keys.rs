@@ -27,20 +27,16 @@ impl SyncEngine {
 
     /// A `PutKeyEnvelopes` sealing every key of the zone to each device of
     /// `devices_json` (a `DeviceList`) this device verifies, other than itself.
-    /// With `service_cert_json` (a `ServiceKeyCertification` the host checked
-    /// with `verifyServiceKey`), it also seals every key to the account's
-    /// service key for the escrow.
+    /// When the engine holds a service key it verified with `verifyServiceKey`,
+    /// every key is also sealed to that key for the escrow; with none verified
+    /// the device envelopes are unchanged and `service_envelopes` is absent.
     #[wasm_bindgen(js_name = envelopesFor)]
-    pub fn envelopes_for(
-        &mut self,
-        zone: &str,
-        devices_json: &str,
-        service_cert_json: Option<String>,
-    ) -> Result<String> {
+    pub fn envelopes_for(&mut self, zone: &str, devices_json: &str) -> Result<String> {
         let devices: wire::DeviceList = parse(devices_json)?;
-        let service_envelopes = match service_cert_json {
-            Some(json) => Some(self.engine.service_envelopes_for(zone, &parse(&json)?)?),
-            None => None,
+        let service_envelopes = if self.engine.has_verified_service_key() {
+            Some(self.engine.service_envelopes_for(zone)?)
+        } else {
+            None
         };
         to_json(&wire::PutKeyEnvelopes {
             envelopes: self.engine.envelopes_for(zone, &devices)?,
@@ -50,11 +46,10 @@ impl SyncEngine {
 
     /// The `NewServiceEnvelope`s of every key of the zone, for the pairs `GET
     /// /v1/keychain/service-missing` lists: each key sealed to the account's
-    /// service key of `cert_json` (a `ServiceKeyCertification` the host checked
-    /// with `verifyServiceKey`).
+    /// service key this engine verified with `verifyServiceKey`. With nothing
+    /// verified it throws `service_key_not_verified` instead of sealing.
     #[wasm_bindgen(js_name = serviceEnvelopesFor)]
-    pub fn service_envelopes_for(&self, zone: &str, cert_json: &str) -> Result<String> {
-        let certification: wire::ServiceKeyCertification = parse(cert_json)?;
-        to_json(&self.engine.service_envelopes_for(zone, &certification)?)
+    pub fn service_envelopes_for(&self, zone: &str) -> Result<String> {
+        to_json(&self.engine.service_envelopes_for(zone)?)
     }
 }
