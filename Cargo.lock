@@ -2058,12 +2058,14 @@ name = "orbyn-wasm"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "ed25519-dalek",
  "orbyn-auth-client",
  "orbyn-client",
  "orbyn-contracts",
  "orbyn-crypto",
  "orbyn-planner",
  "orbyn-sync",
+ "orbyn-translog",
  "serde",
  "serde_json",
  "wasm-bindgen",

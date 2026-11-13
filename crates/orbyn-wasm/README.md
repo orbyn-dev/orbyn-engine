@@ -97,5 +97,37 @@ Clearing the site's data (or the browser's storage for it) deletes the sealed de
 - `applyChanges(zone, zoneChangesJson, now)` (and `applyChangesFrom(zone, since, zoneChangesJson, now)`, required while a zone is refetched after `tokenExpired`): returns `{changed, removed, trashed, quarantined, unverified_deletes, rejected, more}`.
 - `retryQuarantined(zone, now)` after new keys arrive; `trash(zone)` and `takeFromTrash(zone, id)`.
 - `checkZones(zoneListJson)`: returns `{stale, next}`; follow `next` as `?after=`.
-- Devices and keys: `verifyDevices(deviceListJson)` (the ids this device trusts: its approver, the devices that approver endorsed, and their approval chains, minus signed removals), `pinDevice(id, signingKey, agreementKey)`, `createZoneKey(zone)`, `rotateZoneKey(zone)`, `envelopesFor(zone, deviceListJson)` (a `PutKeyEnvelopes`, only to verified devices), `acceptEnvelopes(keyEnvelopeListJson, deviceListJson)`.
+- Devices and keys: `verifyDevices(deviceListJson)` (the ids this device trusts: its approver, the devices that approver endorsed, and their approval chains, minus signed removals), `pinDevice(id, signingKey, agreementKey)`, `createZoneKey(zone)`, `rotateZoneKey(zone)`, `envelopesFor(zone, deviceListJson, serviceCertJson?)` (a `PutKeyEnvelopes`, only to verified devices; with a verified `ServiceKeyCertification`, `service_envelopes` also seals every key of the zone to the account's service key), `acceptEnvelopes(keyEnvelopeListJson, deviceListJson)`, `serviceEnvelopesFor(zone, serviceCertJson)` (the `NewServiceEnvelope[]` for the pairs `GET /v1/keychain/service-missing` lists), `verifyServiceKey(inputJson)` (the service-key check, below).
 - `itemToFields(itemJson, beforeJson?, stampJson)` and `itemFromFields(id, fieldsJson)`.
+
+## Service key check
+
+`verifyServiceKey(inputJson)` checks the account's service key against the transparency log, for a host that fetched the answers from the key service's public API (never through the record server). It keeps nothing itself: store `verified.public_key` and `verified.seen` and pass them back next time.
+
+```js
+const out = JSON.parse(verifyServiceKey(JSON.stringify({
+  pins: {
+    log_keys: [{ version: 1, key: "…" }],       // base64url, 32 bytes
+    witnesses: ["…", "…"],                       // base64url, 32 bytes
+    threshold: 2,                                // more than half of the witnesses
+    identity_keys: [{ version: 1, key: "…" }],   // base64url, 32 bytes
+  },
+  account_id: "…",                               // the account's UUID
+  offered: certification,                        // ServiceKeyCertification from GET /v1/keychain/service-key
+  answers: {
+    lookup: "…",                                 // GET /v1/log/lookup/{service public key}
+    entry_pages: ["…"],                          // GET /v1/log/entries?service_public_key=…
+    consistency: null,                           // GET /v1/log/consistency once the log grew
+  },
+  known_key: storedServiceKey ?? null,           // base64url, 33 bytes; null the first time
+  seen: storedSeen ?? null,                      // verified.seen from the last check
+  now: Date.now(),                               // milliseconds
+}));
+```
+
+`out.verified` holds `{identity_version, public_key, statement_hash, entry_index, seen}`, and only then may the device escrow: `envelopesFor(zone, devices, certification)` or `serviceEnvelopesFor(zone, certification)`. `out.refusal` holds `{code, takeover, message}`:
+
+- `takeover: true`: the account's key or the log is wrong, so show a possible-takeover warning. `key_changed` is a different key for the account than the one already verified; the rest are log verdicts (`log_fork`, `log_rollback`, `bad_identity_signature`, `offered_not_newest`, …).
+- `takeover: false`: not a verdict about the account. `clock_ahead` asks the person to check the device's clock; `needs_consistency` fetches the consistency proof and asks again; `heads_differ`, `too_many_pages` and `malformed` mean the answers were wrong or incomplete, so fetch them again.
+
+A failed fetch, or a 503 `no_published_head` from `GET /v1/keychain/service-key`, is availability: do not call this and send no envelopes yet. Handing `envelopesFor` or `serviceEnvelopesFor` a certification whose statement hash is not of this account and key throws `service_key_mismatch`.

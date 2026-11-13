@@ -50,9 +50,9 @@ pub use trust::{Peer, PinnedKeys, uuid_bytes};
 // `ItemError` (planner only), and the request and response bodies this crate never exposes.
 pub use orbyn_contracts::{
     ApprovalNonce, ConfirmApproval, CreateApproval, DeleteZone, Device, DeviceApp, DeviceList,
-    DevicePlatform, KeyEnvelope, KeyRotation, NewKeyEnvelope, PendingApproval, ProtectionChain,
-    ProtectionLevel, ProtectionLink, Record, RecordChanged, RemoveDevice, SetProtection,
-    UploadChanges, UploadResult, ZoneChanges, ZoneList,
+    DevicePlatform, KeyEnvelope, KeyRotation, NewKeyEnvelope, NewServiceEnvelope, PendingApproval,
+    ProtectionChain, ProtectionLevel, ProtectionLink, Record, RecordChanged, RemoveDevice,
+    ServiceKeyCertification, SetProtection, UploadChanges, UploadResult, ZoneChanges, ZoneList,
 };
 
 use base64::Engine as _;
@@ -64,6 +64,10 @@ use orbyn_crypto::{CryptoError, SymmetricKey};
 pub use orbyn_crypto::{DeviceKeys, DevicePublic};
 use orbyn_sync::{Clock, merge, merge_remote};
 pub use orbyn_sync::{Fields, Stamp};
+// What a host needs to build the verifier's input and to keep its answer: the pins it reads from
+// its configuration and the head it stores (`ServiceKeyPins` and `VerifiedServiceKey` name both),
+// so verifying a service key never means depending on `orbyn-translog` as well.
+pub use orbyn_translog::verify::{Pins, Seen};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use trust::Trust;
@@ -107,8 +111,12 @@ pub enum ClientError {
     RecordDeleted,
     #[error("there is no upload waiting for an answer")]
     NoUpload,
+    /// The answer does not match the upload
     #[error("the answer does not match the upload")]
     Mismatch,
+    /// A certification's statement hash is not the hash of this account's and key's statement.
+    #[error("the certification is not for this account and key")]
+    ServiceKeyMismatch,
     #[error("a key, id or device in the input is not valid")]
     InvalidInput,
     #[error("the system random source failed")]

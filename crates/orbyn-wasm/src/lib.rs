@@ -60,6 +60,7 @@ impl From<ClientError> for Error {
             ClientError::RecordDeleted => "record_deleted",
             ClientError::NoUpload => "no_upload",
             ClientError::Mismatch => "mismatch",
+            ClientError::ServiceKeyMismatch => "service_key_mismatch",
             ClientError::InvalidInput => "invalid_input",
             ClientError::Random => "random_failed",
             ClientError::ExpiredAgain => "expired_again",
@@ -706,30 +707,6 @@ impl SyncEngine {
         )
     }
 
-    /// Compares one `ZoneList` page with this device; returns `{stale, next}`.
-    #[wasm_bindgen(js_name = checkZones)]
-    pub fn check_zones(&self, zones_json: &str) -> Result<String> {
-        let page: wire::ZoneList = parse(zones_json)?;
-        to_json(&self.engine.check_zones(&page))
-    }
-
-    /// Makes the zone's first key; returns its id.
-    #[wasm_bindgen(js_name = createZoneKey)]
-    pub fn create_zone_key(&mut self, zone: &str) -> Result<String> {
-        Ok(self.engine.create_zone_key(zone)?)
-    }
-
-    /// A `PutKeyEnvelopes` sealing every key of the zone to each device of
-    /// `devices_json` (a `DeviceList`) this device verifies, other than itself.
-    #[wasm_bindgen(js_name = envelopesFor)]
-    pub fn envelopes_for(&mut self, zone: &str, devices_json: &str) -> Result<String> {
-        let devices: wire::DeviceList = parse(devices_json)?;
-        to_json(&wire::PutKeyEnvelopes {
-            envelopes: self.engine.envelopes_for(zone, &devices)?,
-            service_envelopes: None,
-        })
-    }
-
     /// Opens a `KeyEnvelopeList`, only from devices of `devices_json` this
     /// device verifies; returns `{zones, refused}`. Call `retryQuarantined`
     /// for each zone that got a key.
@@ -766,13 +743,6 @@ impl SyncEngine {
             agreement: key32(agreement_key)?,
         };
         Ok(self.engine.pin_device(device_id, public)?)
-    }
-
-    /// Replaces the zone's current key with a new one signed by this device;
-    /// returns its id. Send it with `envelopesFor`.
-    #[wasm_bindgen(js_name = rotateZoneKey)]
-    pub fn rotate_zone_key(&mut self, zone: &str) -> Result<String> {
-        Ok(self.engine.rotate_zone_key(zone)?)
     }
 
     /// Tries quarantined records again; returns what changed (`Applied`).
@@ -941,5 +911,10 @@ impl SyncEngine {
     }
 }
 
+mod keys;
+pub mod service_key;
+
+#[cfg(test)]
+mod service_key_tests;
 #[cfg(test)]
 mod tests;

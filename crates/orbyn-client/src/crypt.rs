@@ -13,6 +13,9 @@
 //! - A zone key travels with `orbyn_crypto::wrap_key`, labelled with the
 //!   account, zone and key id. The envelope is the one-time public key, the
 //!   signature, then the sealed key.
+//! - The escrow's envelope is that key sealed to the account's service key with
+//!   `orbyn_crypto::wrap_key_p256`, under the same label, and it names the
+//!   statement hash of the certification it was sealed against.
 //! - A delete is signed by the deleting device under `orbyn/record-delete/v1`
 //!   over the account, zone, record id, the version it deletes and the zone key
 //!   id. The proof is a format byte (1), the key id, the version and the
@@ -24,7 +27,7 @@
 //! the same bytes.
 
 use crate::ClientError;
-use orbyn_crypto::{DeviceKeys, DevicePublic, Sealed, SymmetricKey, WrappedKey};
+use orbyn_crypto::{DeviceKeys, DevicePublic, P256Point, Sealed, SymmetricKey, WrappedKey};
 use orbyn_sync::Fields;
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
@@ -81,7 +84,7 @@ fn record_key_aad(place: Place<'_>, key_id: &KeyId, base: u64) -> Vec<u8> {
     out
 }
 
-fn zone_key_label(account: &[u8; 16], zone: &str, key_id: &KeyId) -> Vec<u8> {
+pub(crate) fn zone_key_label(account: &[u8; 16], zone: &str, key_id: &KeyId) -> Vec<u8> {
     let mut out = Vec::new();
     push(&mut out, ZONE_KEY_LABEL.as_bytes());
     push(&mut out, account);
@@ -195,6 +198,38 @@ pub fn seal_zone_key(
     out.extend_from_slice(&wrapped.signature);
     out.extend_from_slice(&wrapped.sealed.to_bytes());
     Ok(out)
+}
+
+/// The account's service key as a certification showed it: the key itself, the identity version
+/// that certified it, and the hash of the statement that binds them.
+pub(crate) struct ServiceRecipient<'a> {
+    pub service: &'a P256Point,
+    pub identity_version: u32,
+    pub statement_hash: &'a [u8; 32],
+}
+
+/// A zone key sealed to the account's service key, as a service envelope's bytes: the suite byte,
+/// the one-time P-256 key, this device's signature, then the sealed key. The certification's
+/// identity version and statement hash are bound in, so the bytes open only against the exact key
+/// the log showed, under the identity version that certified it.
+pub(crate) fn seal_zone_key_to_service(
+    sender: &DeviceKeys,
+    recipient: &ServiceRecipient<'_>,
+    account: &[u8; 16],
+    zone: &str,
+    key_id: &KeyId,
+    key: &SymmetricKey,
+) -> Result<Vec<u8>, ClientError> {
+    let label = zone_key_label(account, zone, key_id);
+    let wrapped = orbyn_crypto::wrap_key_p256(
+        sender,
+        recipient.service,
+        recipient.identity_version,
+        recipient.statement_hash,
+        &label,
+        key,
+    )?;
+    Ok(wrapped.to_bytes())
 }
 
 /// Opens envelope bytes from [`seal_zone_key`], only when `sender` signed them.

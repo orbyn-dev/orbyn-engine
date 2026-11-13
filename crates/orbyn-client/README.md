@@ -7,10 +7,10 @@ The device sync engine. It keeps a device's cache of records per zone, encrypts 
 | `state` | Engine construction, snapshots, clocks and local record access |
 | `upload` | Staging, deletes, upload batches and their answers |
 | `apply` | Incoming pages, merges, quarantine and refetch handling |
-| `keys` | Zone keys, rotation and envelopes to trusted devices |
+| `keys` | Zone keys, rotation, envelopes to trusted devices and escrow to the service key |
 | `crypt` | Record sealing and delete proofs |
 | `pairing` | Device approvals |
 | `planner` | Planner-record projection |
 | `protection` | Protection settings and their verified head |
-| `service_key` | Service-key verification |
+| `service_key` | Service-key verification and the refusal codes a host branches on |
 | `trust` | Pinned peers and signed device lists |
