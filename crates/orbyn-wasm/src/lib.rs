@@ -60,7 +60,7 @@ impl From<ClientError> for Error {
             ClientError::RecordDeleted => "record_deleted",
             ClientError::NoUpload => "no_upload",
             ClientError::Mismatch => "mismatch",
-            ClientError::ServiceKeyMismatch => "service_key_mismatch",
+            ClientError::ServiceKeyNotVerified => "service_key_not_verified",
             ClientError::InvalidInput => "invalid_input",
             ClientError::Random => "random_failed",
             ClientError::ExpiredAgain => "expired_again",

@@ -115,7 +115,7 @@ It does not trust its own rows for time. A recovery's 72 hours are measured from
 ## Writing service envelopes
 
 - When a device sends envelopes for a key (creation, rotation, approval), it also sends one to the service recipient in the same all-or-nothing batch. It does this only if its verified setting is Standard and it holds a verified service key.
-- A device gets the service key from `GET /v1/keychain/service-key` and verifies the identity signature, then the transparency log (`orbyn_client::verify_service_key`, slice 8d); it seals the zone keys to it with `orbyn_client::service_envelopes_for` (slice 8e). If either the signature or the log check fails, the device does not escrow and reports the failure.
+- A device gets the service key from `GET /v1/keychain/service-key` and verifies the identity signature, then the transparency log (`Engine::verify_service_key`, slice 8d); the engine keeps that key, and `Engine::service_envelopes_for` seals the zone keys to it and to no other (slice 8e). If either the signature or the log check fails, the device does not escrow and reports the failure.
 - **Backfill** runs only for accounts whose verified setting is Standard. That covers new accounts, and accounts after the person turns Standard on.
   - Each trusted device sends service envelopes for keys that lack one, at most 100 per batch.
   - The server answers which (zone, key id) pairs are missing.

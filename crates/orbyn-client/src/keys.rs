@@ -90,38 +90,34 @@ impl Engine {
         Ok(out)
     }
 
-    /// Service envelopes (escrow) of every key of the zone: each key sealed to
-    /// the account's service key of `certification` (`GET
-    /// /v1/keychain/service-key`) and naming the certification's statement
-    /// hash, for `POST /v1/keychain/envelopes` or the pairs `GET
+    /// Service envelopes (escrow) of every key of the zone: each key sealed to the account's
+    /// service key this engine verified ([`Engine::verify_service_key`]) and naming that key's
+    /// statement, for `POST /v1/keychain/envelopes` or the pairs `GET
     /// /v1/keychain/service-missing` lists.
     ///
-    /// The host verifies the certification first ([`crate::verify_service_key`]);
-    /// the statement is rebuilt here from the account, the key and the identity
-    /// version, so a certification whose hash belongs to another statement is
-    /// refused with [`ClientError::ServiceKeyMismatch`] instead of sealing the
-    /// key under bytes the service would never accept.
-    pub fn service_envelopes_for(
-        &self,
-        zone: &str,
-        certification: &wire::ServiceKeyCertification,
-    ) -> Result<Vec<wire::NewServiceEnvelope>> {
+    /// The recipient is the key the engine itself checked against the log; there is no argument
+    /// to seal to any other, so a certification the record server made up can never receive a zone
+    /// key. With nothing verified the call refuses with
+    /// [`ClientError::ServiceKeyNotVerified`] instead of sealing.
+    pub fn service_envelopes_for(&self, zone: &str) -> Result<Vec<wire::NewServiceEnvelope>> {
+        let verified = self
+            .service_key
+            .as_ref()
+            .ok_or(ClientError::ServiceKeyNotVerified)?;
         let account = self.trust.account;
         let z = self.zones.get(zone).ok_or(ClientError::NoZoneKey)?;
         if z.keys.is_empty() {
             return Err(ClientError::NoZoneKey);
         }
-        let service = P256Point::parse(&unb64(&certification.public_key)?)?;
+        let service = P256Point::parse(&verified.public_key)?;
+        // Rebuilt from this engine's account and the verified key, never taken from an input.
         let statement =
-            orbyn_crypto::service_key_statement(certification.identity_version, &account, &service);
+            orbyn_crypto::service_key_statement(verified.identity_version, &account, &service);
         let statement_hash = orbyn_crypto::service_key_statement_hash(&statement);
-        if b64(&statement_hash) != certification.statement_hash {
-            return Err(ClientError::ServiceKeyMismatch);
-        }
         let mut out = Vec::with_capacity(z.keys.len());
         let recipient = crypt::ServiceRecipient {
             service: &service,
-            identity_version: certification.identity_version,
+            identity_version: verified.identity_version,
             statement_hash: &statement_hash,
         };
         for (id, key) in &z.keys {
@@ -253,11 +249,11 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
     use orbyn_crypto::{
-        P256Keys, WrappedKeyP256, service_key_signed_bytes, service_key_statement,
-        service_key_statement_hash, unwrap_key_p256,
+        P256Keys, WrappedKeyP256, service_key_statement, service_key_statement_hash,
+        unwrap_key_p256,
     };
+    use orbyn_translog::verify::Seen;
 
     const ACCOUNT: [u8; 16] = [7; 16];
     const DEVICE: &str = "0000000a-0000-4000-8000-00000000000a";
@@ -274,25 +270,22 @@ mod tests {
         )
     }
 
-    /// The certification the record server offers for `service` under identity version 1, and
-    /// the statement hash it must name.
-    fn certified(service: &P256Keys) -> (wire::ServiceKeyCertification, [u8; 32]) {
+    /// The key `verify_service_key` would hand back for `service` under identity version 1.
+    fn verified(service: &P256Keys) -> VerifiedServiceKey {
         let statement = service_key_statement(1, &ACCOUNT, &service.public());
-        let signature = SigningKey::from_bytes(&[9; 32])
-            .sign(&service_key_signed_bytes(&statement))
-            .to_bytes();
-        let hash = service_key_statement_hash(&statement);
-        (
-            wire::ServiceKeyCertification {
-                account_id: uuid(&ACCOUNT),
-                identity_version: 1,
-                public_key: b64(service.public().compressed()),
-                statement_hash: b64(&hash),
-                signature: b64(&signature),
-                entry_index: 3,
+        VerifiedServiceKey {
+            identity_version: 1,
+            public_key: *service.public().compressed(),
+            statement_hash: service_key_statement_hash(&statement),
+            entry_index: 3,
+            seen: Seen {
+                size: 1,
+                log_root: [0; 32],
+                service_map_root: [0; 32],
+                identity_map_root: [0; 32],
+                witnessed_ms: 0,
             },
-            hash,
-        )
+        }
     }
 
     fn engine() -> Engine {
@@ -307,15 +300,15 @@ mod tests {
     }
 
     #[test]
-    fn every_key_of_the_zone_is_sealed_to_the_service_key_and_opens_with_it() {
+    fn every_key_of_the_zone_is_sealed_to_the_verified_service_key_and_opens_with_it() {
         let mut engine = engine();
         engine.rotate_zone_key("inbox").expect("rotation");
         let service = P256Keys::generate().expect("service");
-        let (certification, hash) = certified(&service);
+        let hash =
+            service_key_statement_hash(&service_key_statement(1, &ACCOUNT, &service.public()));
+        engine.service_key = Some(verified(&service));
 
-        let envelopes = engine
-            .service_envelopes_for("inbox", &certification)
-            .expect("envelopes");
+        let envelopes = engine.service_envelopes_for("inbox").expect("envelopes");
         // The rotated key is escrowed beside the one it replaced: old records still open with it.
         assert_eq!(envelopes.len(), 2);
         for envelope in &envelopes {
@@ -330,7 +323,7 @@ mod tests {
             let opened = unwrap_key_p256(
                 &service,
                 &engine.keys.public(),
-                certification.identity_version,
+                1,
                 &hash,
                 &crypt::zone_key_label(&ACCOUNT, "inbox", &id),
                 &wrapped,
@@ -344,47 +337,37 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_hash_that_is_not_of_this_account_and_key_is_refused() {
+    fn nothing_verified_seals_nothing() {
         let engine = engine();
-        let service = P256Keys::generate().expect("service");
-        let (mut certification, _) = certified(&service);
-        certification.statement_hash = b64(&[1; 32]);
         assert!(matches!(
-            engine.service_envelopes_for("inbox", &certification),
-            Err(ClientError::ServiceKeyMismatch)
+            engine.service_envelopes_for("inbox"),
+            Err(ClientError::ServiceKeyNotVerified)
         ));
     }
 
     #[test]
-    fn another_accounts_certification_is_also_a_mismatch() {
-        let engine = engine();
+    fn the_statement_is_rebuilt_from_this_account_and_the_held_key() {
+        let mut engine = engine();
         let service = P256Keys::generate().expect("service");
-        let statement = service_key_statement(1, &[8; 16], &service.public());
-        let hash = service_key_statement_hash(&statement);
-        let signature = SigningKey::from_bytes(&[9; 32])
-            .sign(&service_key_signed_bytes(&statement))
-            .to_bytes();
-        let certification = wire::ServiceKeyCertification {
-            account_id: uuid(&[8; 16]),
-            identity_version: 1,
-            public_key: b64(service.public().compressed()),
-            statement_hash: b64(&hash),
-            signature: b64(&signature),
-            entry_index: 3,
-        };
-        assert!(matches!(
-            engine.service_envelopes_for("inbox", &certification),
-            Err(ClientError::ServiceKeyMismatch)
-        ));
+        let mut held = verified(&service);
+        // A stored hash cannot choose what the envelope names: the engine rebuilds it.
+        held.statement_hash = [1; 32];
+        engine.service_key = Some(held);
+
+        let envelopes = engine.service_envelopes_for("inbox").expect("envelopes");
+        let hash =
+            service_key_statement_hash(&service_key_statement(1, &ACCOUNT, &service.public()));
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0].statement_hash, b64(&hash));
     }
 
     #[test]
     fn a_zone_this_device_has_no_key_for_has_nothing_to_escrow() {
-        let engine = engine();
+        let mut engine = engine();
         let service = P256Keys::generate().expect("service");
-        let (certification, _) = certified(&service);
+        engine.service_key = Some(verified(&service));
         assert!(matches!(
-            engine.service_envelopes_for("elsewhere", &certification),
+            engine.service_envelopes_for("elsewhere"),
             Err(ClientError::NoZoneKey)
         ));
     }

@@ -458,6 +458,45 @@ pub fn verify_service_key(
     })
 }
 
+impl crate::Engine {
+    /// Checks the account's service key against the log and keeps it on `Ok`. From then on
+    /// [`crate::Engine::service_envelopes_for`] seals zone keys to that key and no other; a
+    /// refusal leaves the previous key, if any, in place.
+    ///
+    /// `known_key` and `seen` default to the key and head this engine already holds, so a host that
+    /// omits them cannot fall back to trust on first use or to a head older than the one this
+    /// engine saw.
+    pub fn verify_service_key(
+        &mut self,
+        pins: &ServiceKeyPins,
+        offered: &wire::ServiceKeyCertification,
+        answers: &LogAnswers<'_>,
+        known_key: Option<&ServicePublicKey>,
+        seen: Option<&Seen>,
+        now_ms: u64,
+    ) -> Result<VerifiedServiceKey, ServiceKeyRefusal> {
+        let held = self.service_key.as_ref();
+        let known = known_key.or_else(|| held.map(|key| &key.public_key));
+        let seen = seen.or_else(|| held.map(|key| &key.seen));
+        let verified = verify_service_key(
+            pins,
+            self.trust.account,
+            offered,
+            answers,
+            known,
+            seen,
+            now_ms,
+        )?;
+        self.service_key = Some(verified.clone());
+        Ok(verified)
+    }
+
+    /// Whether this engine holds a service key that [`crate::Engine::verify_service_key`] accepted.
+    pub fn has_verified_service_key(&self) -> bool {
+        self.service_key.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
