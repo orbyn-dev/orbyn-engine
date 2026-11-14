@@ -82,7 +82,9 @@ impl HeldServiceKey {
 }
 
 /// The newer of the head a host passed and the head this engine holds: the larger log wins, and
-/// on a tie the held one, so a host can never move the engine to an older head.
+/// on a tie the held one, so a host can never move the engine to an older head. Heads are compared
+/// by size only: a host head that is not an extension of the held one (a fork) is caught later by
+/// `check_progress`, so comparing size here cannot accept a forked log.
 pub(crate) fn newer(host: Option<&Seen>, held: Option<&Seen>) -> Option<Seen> {
     match (host, held) {
         (Some(host), Some(held)) if host.size > held.size => Some(*host),
