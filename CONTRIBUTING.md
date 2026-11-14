@@ -34,6 +34,8 @@ To turn it on, set `CI_RUNNER=local` (Settings, Secrets and variables, Actions, 
 
 The runner image has git and Python 3.12 but no C compiler or `make`, no Rust and no `sudo`; the moved jobs install what they need without root (`dtolnay/rust-toolchain`, a prebuilt `cargo-audit`). A job that compiles C code must stay hosted.
 
+**Current state (2026-11-14).** The owner set `CI_RUNNER=local` on this repository and admitted public repositories to the runner group while the repository is still public, as a deliberate choice. The risk above applies: a fork's pull request runs its own copy of `ci.yml` and can name the runner. Until the repository is private, set the repository's Actions setting for approving workflow runs to "Require approval for all outside collaborators" (today it is "first-time contributors only"), and never approve a run from a fork that changes `.github/workflows`. The runner image now also has gcc.
+
 ## Structure
 
 - One crate, one role: [crates/README.md](crates/README.md) lists them and the allowed dependency direction.
