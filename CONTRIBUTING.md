@@ -26,6 +26,14 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 
 Tests that need Postgres read `DATABASE_URL`. `docker compose up -d postgres` starts one locally.
 
+## Local runners
+
+Three cheap Linux jobs (`changes`, `Cheap checks`, `Security audit`) can run on the organisation's self-hosted runners (group `orbyn-local`, labels `self-hosted, orbyn-local`). They do so only when the repository variable `CI_RUNNER` is `local`; unset, everything runs on GitHub-hosted runners as before. A pull request from a fork always runs hosted, whatever the variable says. The Rust lane (Postgres and SoftHSM service containers), the Docker image, macOS and Windows, and the title, AI usage, commit trailer and CLA workflows stay hosted.
+
+To turn it on, set `CI_RUNNER=local` (Settings, Secrets and variables, Actions, Variables), **only after** the repository is private or the runner group allows this repository. The group currently excludes public repositories, so with the variable set a job would wait forever for a runner. Unset the variable to go back.
+
+The runner image has git and Python 3.12 but no C compiler or `make`, no Rust and no `sudo`; the moved jobs install what they need without root (`dtolnay/rust-toolchain`, a prebuilt `cargo-audit`). A job that compiles C code must stay hosted.
+
 ## Structure
 
 - One crate, one role: [crates/README.md](crates/README.md) lists them and the allowed dependency direction.
