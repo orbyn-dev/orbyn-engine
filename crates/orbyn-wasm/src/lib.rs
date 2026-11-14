@@ -20,8 +20,7 @@ use orbyn_contracts as wire;
 use orbyn_crypto::{DevicePublic, Sealed, SymmetricKey};
 use orbyn_planner::Item;
 use orbyn_sync::{Fields, Stamp};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
@@ -61,6 +60,7 @@ impl From<ClientError> for Error {
             ClientError::NoUpload => "no_upload",
             ClientError::Mismatch => "mismatch",
             ClientError::ServiceKeyNotVerified => "service_key_not_verified",
+            ClientError::ProtectionNotStandard => "protection_not_standard",
             ClientError::InvalidInput => "invalid_input",
             ClientError::Random => "random_failed",
             ClientError::ExpiredAgain => "expired_again",

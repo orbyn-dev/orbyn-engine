@@ -26,6 +26,7 @@
 mod apply;
 pub mod crypt;
 mod described;
+mod held_key;
 mod keys;
 mod pairing;
 mod planner;
@@ -36,6 +37,7 @@ mod trust;
 mod upload;
 
 pub use crypt::KeyId;
+pub use held_key::HeldServiceKey;
 pub use pairing::{ApproverPairing, DevicePairing, ENDORSEMENT_CONTEXT, MAX_ENDORSED};
 pub use planner::{ITEM_TYPE, item_fields, item_from_fields};
 pub use protection::{ProtectionFloor, ProtectionHead, ProtectionState, ProtectionStatus};
@@ -118,6 +120,10 @@ pub enum ClientError {
     /// zone key to one.
     #[error("the service key has not been verified by this engine")]
     ServiceKeyNotVerified,
+    /// Escrow needs the newest protection setting this device verified to say Standard: Advanced,
+    /// a setting it cannot yet vouch for (provisional) and no setting at all never allow it.
+    #[error("escrow needs a verified Standard protection setting")]
+    ProtectionNotStandard,
     #[error("a key, id or device in the input is not valid")]
     InvalidInput,
     #[error("the system random source failed")]
@@ -393,6 +399,15 @@ pub struct Snapshot {
     /// Whether the last walk of the chain reached the server's head with nothing stopped.
     #[serde(default)]
     pub protection_complete: bool,
+    /// The service key this engine verified and the head it was checked against. Absent in a
+    /// snapshot made before it was kept; see `service_key_tracked`.
+    #[serde(default)]
+    pub service_key: Option<HeldServiceKey>,
+    /// Whether this snapshot knows about the service key at all. A snapshot without the field
+    /// (older) reads as `false`: the restored engine does not know whether it ever verified a
+    /// key, and will not fall back to trust on first use on its own.
+    #[serde(default)]
+    pub service_key_tracked: bool,
     pub zones: BTreeMap<String, ZoneSnapshot>,
 }
 
@@ -445,6 +460,10 @@ pub struct Engine {
     /// The account's service key this engine verified against the transparency log, if any. The
     /// only key [`Engine::service_envelopes_for`] will seal a zone key to.
     service_key: Option<VerifiedServiceKey>,
+    /// Restored from a snapshot made before snapshots kept the service key: whether this engine
+    /// verified one earlier is unknown, so the next check must be given the key the host kept, or
+    /// the host must say it has none ([`Engine::confirm_service_key_first_use`]).
+    service_key_history_unknown: bool,
     clock: Clock,
     zones: BTreeMap<String, ZoneState>,
     /// Records whose newest stamp was more than an hour ahead of the clock when

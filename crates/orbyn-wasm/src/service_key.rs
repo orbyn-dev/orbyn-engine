@@ -189,6 +189,15 @@ fn key33(text: &str) -> Result<[u8; 33]> {
 /// on ([`SyncEngine::service_envelopes_for`] and `envelopesFor`).
 #[wasm_bindgen]
 impl SyncEngine {
+    /// After `restore` from a snapshot made before snapshots kept the service key, `verifyServiceKey`
+    /// refuses with `held_key_unknown` unless it is given `known_key`. A host that has no key to
+    /// give (this account never had one verified) says so with this call, once, and the next
+    /// check is the first use, trusted and kept. It is never implied.
+    #[wasm_bindgen(js_name = confirmServiceKeyFirstUse)]
+    pub fn confirm_service_key_first_use(&mut self) {
+        self.engine.confirm_service_key_first_use();
+    }
+
     #[wasm_bindgen(js_name = verifyServiceKey)]
     pub fn verify_service_key(&mut self, input_json: &str) -> Result<String> {
         let input: CheckJson = parse(input_json)?;

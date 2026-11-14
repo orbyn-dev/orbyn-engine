@@ -141,11 +141,18 @@ fn the_service_key_check_answers_a_host_through_json() -> Result<()> {
 }
 
 #[test]
-fn escrow_uses_only_the_key_the_engine_verified() -> Result<()> {
+fn escrow_uses_only_the_key_the_engine_verified_and_only_under_standard() -> Result<()> {
     let keys = DeviceKeys::create()?;
     let mut engine = SyncEngine::create(&keys, ACCOUNT, "0000000a-0000-4000-8000-00000000000a")?;
     engine.create_zone_key("inbox")?;
     let no_devices = json!({"devices": [], "next": null}).to_string();
+    let escrowed = |engine: &mut SyncEngine| -> Result<bool> {
+        let put: Value = serde_json::from_str(&engine.envelopes_for("inbox", &no_devices)?)
+            .map_err(|e| error("invalid_json", e))?;
+        Ok(put["service_envelopes"]
+            .as_array()
+            .is_some_and(|list| !list.is_empty()))
+    };
 
     // With nothing verified, asking for the escrow envelopes is a coded refusal.
     assert_eq!(
@@ -159,14 +166,23 @@ fn escrow_uses_only_the_key_the_engine_verified() -> Result<()> {
     assert_eq!(put["envelopes"], json!([]));
     assert!(put.get("service_envelopes").is_none_or(Value::is_null));
 
-    // Once the engine has verified a key, the envelopes name that key's statement and are
-    // included in the same put.
+    // A verified key alone is not enough: with no verified protection setting there is no
+    // escrow, a coded refusal when asked and nothing added to the put.
     let service = orbyn_crypto::P256Keys::generate()?;
     let (input, _, hash) = service_key_world(&service);
     let verdict: Value = serde_json::from_str(&engine.verify_service_key(&input.to_string())?)
         .map_err(|e| error("invalid_json", e))?;
     assert!(verdict.get("verified").is_some());
+    assert_eq!(
+        engine.service_envelopes_for("inbox").map_err(|e| e.code),
+        Err("protection_not_standard")
+    );
+    assert!(!escrowed(&mut engine)?);
 
+    // Once the newest verified setting says Standard, the envelopes name the key's statement
+    // and are included in the same put.
+    let mut links = Vec::new();
+    crate::tests::sign_and_verify_protection(&mut engine, &keys, "standard", &mut links)?;
     let envelopes: Value = serde_json::from_str(&engine.service_envelopes_for("inbox")?)
         .map_err(|e| error("invalid_json", e))?;
     assert_eq!(envelopes.as_array().map(Vec::len), Some(1));
@@ -181,5 +197,13 @@ fn escrow_uses_only_the_key_the_engine_verified() -> Result<()> {
     assert_eq!(included.len(), 1);
     assert_eq!(included[0]["zone"], json!("inbox"));
     assert_eq!(included[0]["statement_hash"], json!(b64(&hash)));
+
+    // The person switches to Advanced: escrow stops, with the same coded refusal.
+    crate::tests::sign_and_verify_protection(&mut engine, &keys, "advanced", &mut links)?;
+    assert_eq!(
+        engine.service_envelopes_for("inbox").map_err(|e| e.code),
+        Err("protection_not_standard")
+    );
+    assert!(!escrowed(&mut engine)?);
     Ok(())
 }

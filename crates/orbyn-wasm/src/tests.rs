@@ -431,6 +431,27 @@ fn restoring_does_not_move_the_clock_to_the_restore_time() -> Result<()> {
     Ok(())
 }
 
+/// `engine` signs `level` as its next protection setting and verifies it, so that is the newest
+/// setting it knows (verified, anchored, complete). `links` are the settings already in the chain.
+pub(crate) fn sign_and_verify_protection(
+    engine: &mut SyncEngine,
+    keys: &DeviceKeys,
+    level: &str,
+    links: &mut Vec<Value>,
+) -> Result<()> {
+    let devices = json!({"devices": [device(A, keys, "trusted")], "removals": []}).to_string();
+    let body: Value = serde_json::from_str(&engine.sign_protection(level, NOW_S)?)
+        .map_err(|e| error("invalid_json", e))?;
+    links.push(json!({
+        "level": body["level"], "seq": body["seq"], "prev": body["prev"],
+        "signed_at": body["signed_at"], "signer_device_id": A,
+        "signature": body["device_signature"],
+    }));
+    let chain = json!({"links": links, "more": false}).to_string();
+    engine.verify_protection(&chain, &devices)?;
+    Ok(())
+}
+
 #[test]
 fn protection_settings_are_signed_and_verified_through_json() -> Result<()> {
     let keys = DeviceKeys::create()?;

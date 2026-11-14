@@ -27,13 +27,17 @@ impl SyncEngine {
 
     /// A `PutKeyEnvelopes` sealing every key of the zone to each device of
     /// `devices_json` (a `DeviceList`) this device verifies, other than itself.
-    /// When the engine holds a service key it verified with `verifyServiceKey`,
-    /// every key is also sealed to that key for the escrow; with none verified
-    /// the device envelopes are unchanged and `service_envelopes` is absent.
+    /// When the engine holds a service key it verified with `verifyServiceKey`
+    /// **and** the newest protection setting it verified says Standard, every key
+    /// is also sealed to that key for the escrow; otherwise (no key, Advanced, a
+    /// setting it cannot vouch for, or none) the device envelopes are unchanged
+    /// and `service_envelopes` is absent.
     #[wasm_bindgen(js_name = envelopesFor)]
     pub fn envelopes_for(&mut self, zone: &str, devices_json: &str) -> Result<String> {
         let devices: wire::DeviceList = parse(devices_json)?;
-        let service_envelopes = if self.engine.has_verified_service_key() {
+        let escrow = self.engine.has_verified_service_key()
+            && self.engine.protection_level().is_verified_standard();
+        let service_envelopes = if escrow {
             Some(self.engine.service_envelopes_for(zone)?)
         } else {
             None
@@ -47,7 +51,9 @@ impl SyncEngine {
     /// The `NewServiceEnvelope`s of every key of the zone, for the pairs `GET
     /// /v1/keychain/service-missing` lists: each key sealed to the account's
     /// service key this engine verified with `verifyServiceKey`. With nothing
-    /// verified it throws `service_key_not_verified` instead of sealing.
+    /// verified it throws `service_key_not_verified` instead of sealing, and unless the
+    /// newest setting this device verified says Standard it throws
+    /// `protection_not_standard`.
     #[wasm_bindgen(js_name = serviceEnvelopesFor)]
     pub fn service_envelopes_for(&self, zone: &str) -> Result<String> {
         to_json(&self.engine.service_envelopes_for(zone)?)
