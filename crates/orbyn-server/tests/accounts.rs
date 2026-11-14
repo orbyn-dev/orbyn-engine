@@ -4420,8 +4420,14 @@ async fn timing_round(server: &Server, a: &Value, b: &Value, wrong: &str) -> (f6
 /// passes at the first round within `TIMING_TOLERANCE`. A real leak is a fixed extra cost on one
 /// path, so it shows in every round and no round can pass; a loaded machine slows both paths
 /// together and cancels in the pairs, and a disturbance that spoils one round does not spoil the
-/// next. (Measured on an idle machine: a clean path gives at most 0.02 and a path 1 ms slower gives
-/// 0.20 or more; under twice as many busy processes as cores a clean path gave at most 0.03.)
+/// next. (Measured on an idle machine on a path of about 9 ms: a clean path gives at most 0.02, and a
+/// path 1.4 ms slower, the smallest tested, gives 0.14 to 0.16; 2.8 ms gives 0.23 to 0.26. Under
+/// twice as many busy processes as cores a clean path gave at most 0.03. So a leak of about 13% of
+/// the time, some 1.2 ms here, fails every round reliably; one near the 10% line can pass a round.)
+///
+/// The test catches fixed-cost leaks, not intermittent ones: a median cannot see a leak that affects
+/// fewer than half of the calls. The production path is deterministic (the same steps and queries
+/// for both, no branch that is sometimes taken), so there is no known source of such a leak.
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn verifying_a_real_sign_up_and_a_decoy_takes_about_the_same_time() {
