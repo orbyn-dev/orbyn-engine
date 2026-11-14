@@ -32,9 +32,10 @@ jobs:
   changes:
     name: Changes
     # Runs on the organisation's self-hosted runners only when the repository variable CI_RUNNER is 'local'; with it
-    # unset this is `ubuntu-24.04`, as before. A pull request from a fork never goes local, whatever the variable
-    # says: this repository is public, and a fork's code must not run on our machines. The same line is on every job
-    # that moved (`changes`, `lint`, `audit`). Docker, service containers, macOS and Windows stay hosted.
+    # unset this is `ubuntu-24.04`, as before. This check sends our own fork pull requests to hosted runners; the real
+    # boundary is a private repository plus the runner group, because a fork's pull request runs its own copy of this
+    # file and can name any runner. The same line is on every job that moved (`changes`, `lint`, `audit`). Docker,
+    # service containers, macOS and Windows stay hosted.
     runs-on: ${{ vars.CI_RUNNER == 'local' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","orbyn-local"]') || 'ubuntu-24.04' }}
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
