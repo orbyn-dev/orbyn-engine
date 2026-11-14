@@ -4373,6 +4373,61 @@ async fn a_real_sign_up_and_a_decoy_take_the_same_steps_to_verify_and_to_resend(
     assert!(real_resend.contains(&"row-lock"), "{real_resend:?}");
 }
 
+/// How the timing of a real sign-up and a decoy is compared (see the test below). Pairs per round, rounds at
+/// most, and the largest share of the pooled median time that the median of the per-pair differences may be.
+const TIMING_PAIRS: usize = 100;
+const TIMING_ROUNDS: usize = 3;
+const TIMING_TOLERANCE: f64 = 0.10;
+
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    values[values.len() / 2]
+}
+
+/// One round: `TIMING_PAIRS` wrong-code verifications of each of `a` and `b`, taken in pairs, with the
+/// order inside a pair alternating, so a slow moment and an order effect hit both alike. Returns the
+/// median of the per-pair differences (`a - b`, in milliseconds) and the median of all the samples.
+async fn timing_round(server: &Server, a: &Value, b: &Value, wrong: &str) -> (f64, f64) {
+    let (mut differences, mut all) = (Vec::new(), Vec::new());
+    for pair in 0..TIMING_PAIRS {
+        let order = if pair % 2 == 0 {
+            [(a, true), (b, false)]
+        } else {
+            [(b, false), (a, true)]
+        };
+        let (mut a_took, mut b_took) = (0.0, 0.0);
+        for (id, is_a) in order {
+            let started = std::time::Instant::now();
+            assert_eq!(server.verify(id, wrong).await, refused());
+            let took = started.elapsed().as_secs_f64() * 1000.0;
+            if is_a {
+                a_took = took;
+            } else {
+                b_took = took;
+            }
+        }
+        differences.push(a_took - b_took);
+        all.extend([a_took, b_took]);
+    }
+    (median(differences), median(all))
+}
+
+/// A decoy (a sign-up for an address that already has an account) must not take a different time to
+/// verify than a real one, or the time tells a stranger whether an account exists.
+///
+/// The test takes `TIMING_ROUNDS` rounds at most. A round compares `TIMING_PAIRS` interleaved pairs by
+/// the median of their per-pair differences, relative to the median time of all samples, and the test
+/// passes at the first round within `TIMING_TOLERANCE`. A real leak is a fixed extra cost on one
+/// path, so it shows in every round and no round can pass; a loaded machine slows both paths
+/// together and cancels in the pairs, and a disturbance that spoils one round does not spoil the
+/// next. (Measured on an idle machine on a path of about 9 ms: a clean path gives at most 0.02, and a
+/// path 1.4 ms slower, the smallest tested, gives 0.14 to 0.16; 2.8 ms gives 0.23 to 0.26. Under
+/// twice as many busy processes as cores a clean path gave at most 0.03. So a leak of about 13% of
+/// the time, some 1.2 ms here, fails every round reliably; one near the 10% line can pass a round.)
+///
+/// The test catches fixed-cost leaks, not intermittent ones: a median cannot see a leak that affects
+/// fewer than half of the calls. The production path is deterministic (the same steps and queries
+/// for both, no branch that is sometimes taken), so there is no known source of such a leak.
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn verifying_a_real_sign_up_and_a_decoy_takes_about_the_same_time() {
@@ -4385,26 +4440,22 @@ async fn verifying_a_real_sign_up_and_a_decoy_takes_about_the_same_time() {
         .await;
     let decoy = start_as(&server, &owner, "intruder").await;
     let wrong = other_than(&code);
-    let median = |mut v: Vec<Duration>| {
-        v.sort();
-        v[v.len() / 2]
-    };
-    // Alternate, so a slow moment hits both alike.
-    let (mut real_times, mut decoy_times) = (Vec::new(), Vec::new());
-    for _ in 0..40 {
-        for (id, times) in [(&real, &mut real_times), (&decoy, &mut decoy_times)] {
-            let started = std::time::Instant::now();
-            assert_eq!(server.verify(id, &wrong).await, refused());
-            times.push(started.elapsed());
+    let mut rounds = Vec::new();
+    for _ in 0..TIMING_ROUNDS {
+        let (difference, pooled) = timing_round(&server, &real, &decoy, &wrong).await;
+        let share = difference.abs() / pooled;
+        if share <= TIMING_TOLERANCE {
+            return;
         }
+        rounds.push(format!(
+            "real - decoy {difference:+.2} ms of {pooled:.2} ms ({:.1}% against {:.0}% allowed)",
+            share * 100.0,
+            TIMING_TOLERANCE * 100.0
+        ));
     }
-    let (r, d) = (median(real_times), median(decoy_times));
-    let gap = r.abs_diff(d);
-    // A path that skipped the row, the lock or the limiters would be several milliseconds
-    // faster; the two must be within a third of each other (and a millisecond of noise).
-    assert!(
-        gap <= Duration::from_millis(1).max(r.max(d) / 3),
-        "real {r:?} against decoy {d:?}"
+    panic!(
+        "real and decoy differ in every round: {}",
+        rounds.join("; ")
     );
 }
 
