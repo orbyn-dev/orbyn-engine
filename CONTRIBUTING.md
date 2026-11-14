@@ -34,6 +34,8 @@ To turn it on, set `CI_RUNNER=local` (Settings, Secrets and variables, Actions, 
 
 The runner image has git and Python 3.12 but no C compiler or `make`, no Rust and no `sudo`; the moved jobs install what they need without root (`dtolnay/rust-toolchain`, a prebuilt `cargo-audit`). A job that compiles C code must stay hosted.
 
+**Current state (2026-11-14).** The variable `CI_RUNNER` is not set, so every job runs on GitHub-hosted runners. The owner admitted public repositories to the runner group and set `CI_RUNNER=local` once as a test while the repository is public. The three moved jobs started on the runners, but `Cheap checks` failed at the Rust toolchain step because the runner containers mount `/tmp` without execute permission (`rustup-init` could not run), so the variable was removed again. The fix is in the runner configuration (`ci-runner`), not here. Before the variable is set again, two things apply while the repository is public: a fork's pull request runs its own copy of `ci.yml` and can name the runner, so set the repository's Actions setting for approving workflow runs to "Require approval for all outside collaborators" (today it is "first-time contributors only"), and never approve a run from a fork that changes `.github/workflows`. Making the repository private removes the risk.
+
 ## Structure
 
 - One crate, one role: [crates/README.md](crates/README.md) lists them and the allowed dependency direction.
