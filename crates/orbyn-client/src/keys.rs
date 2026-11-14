@@ -98,7 +98,8 @@ impl Engine {
     /// The recipient is the key the engine itself checked against the log; there is no argument
     /// to seal to any other, so a certification the record server made up can never receive a zone
     /// key. With nothing verified the call refuses with
-    /// [`ClientError::ServiceKeyNotVerified`] instead of sealing.
+    /// [`ClientError::ServiceKeyNotVerified`] instead of sealing, and unless the newest setting
+    /// this device verified says Standard it refuses with [`ClientError::ProtectionNotStandard`].
     pub fn service_envelopes_for(&self, zone: &str) -> Result<Vec<wire::NewServiceEnvelope>> {
         let verified = self
             .service_key
@@ -108,6 +109,11 @@ impl Engine {
         let z = self.zones.get(zone).ok_or(ClientError::NoZoneKey)?;
         if z.keys.is_empty() {
             return Err(ClientError::NoZoneKey);
+        }
+        // Escrow only under the newest setting this device verified saying Standard: not Advanced,
+        // not a setting it cannot vouch for, and not none (docs/key-service.md).
+        if !self.protection_level().is_verified_standard() {
+            return Err(ClientError::ProtectionNotStandard);
         }
         let service = P256Point::parse(&verified.public_key)?;
         // Rebuilt from this engine's account and the verified key, never taken from an input.
@@ -288,6 +294,30 @@ mod tests {
         }
     }
 
+    /// An engine whose newest verified protection setting says `state`.
+    fn engine_with(head: Option<(crate::protection::ProtectionHead, bool)>) -> Engine {
+        let mut engine = engine();
+        if let Some((head, complete)) = head {
+            engine.protection =
+                crate::protection::Protection::import(Some(&head), None, true, complete)
+                    .expect("protection");
+        }
+        engine
+    }
+
+    fn head(level: wire::ProtectionLevel) -> crate::protection::ProtectionHead {
+        crate::protection::ProtectionHead {
+            seq: 1,
+            level,
+            hash: b64(&[1; 32]),
+        }
+    }
+
+    /// An engine that verified Standard: the only one allowed to escrow.
+    fn standard_engine() -> Engine {
+        engine_with(Some((head(wire::ProtectionLevel::Standard), true)))
+    }
+
     fn engine() -> Engine {
         let mut engine = Engine::new(
             DeviceKeys::generate().expect("keys"),
@@ -301,7 +331,7 @@ mod tests {
 
     #[test]
     fn every_key_of_the_zone_is_sealed_to_the_verified_service_key_and_opens_with_it() {
-        let mut engine = engine();
+        let mut engine = standard_engine();
         engine.rotate_zone_key("inbox").expect("rotation");
         let service = P256Keys::generate().expect("service");
         let hash =
@@ -347,7 +377,7 @@ mod tests {
 
     #[test]
     fn the_statement_is_rebuilt_from_this_account_and_the_held_key() {
-        let mut engine = engine();
+        let mut engine = standard_engine();
         let service = P256Keys::generate().expect("service");
         let mut held = verified(&service);
         // A stored hash cannot choose what the envelope names: the engine rebuilds it.
@@ -363,12 +393,59 @@ mod tests {
 
     #[test]
     fn a_zone_this_device_has_no_key_for_has_nothing_to_escrow() {
-        let mut engine = engine();
+        let mut engine = standard_engine();
         let service = P256Keys::generate().expect("service");
         engine.service_key = Some(verified(&service));
         assert!(matches!(
             engine.service_envelopes_for("elsewhere"),
             Err(ClientError::NoZoneKey)
+        ));
+    }
+
+    /// The levels an engine can be at, and whether each may escrow.
+    fn each_level() -> Vec<(&'static str, Engine, bool)> {
+        use wire::ProtectionLevel::{Advanced, Standard};
+        vec![
+            ("advanced", engine_with(Some((head(Advanced), true))), false),
+            ("unknown", engine_with(None), false),
+            (
+                "provisional standard",
+                engine_with(Some((head(Standard), false))),
+                false,
+            ),
+            (
+                "provisional advanced",
+                engine_with(Some((head(Advanced), false))),
+                false,
+            ),
+            ("verified standard", standard_engine(), true),
+        ]
+    }
+
+    #[test]
+    fn escrow_needs_a_verified_standard_setting_and_nothing_else_seals() {
+        let service = P256Keys::generate().expect("service");
+        for (name, mut engine, allowed) in each_level() {
+            // A service key is verified in every case: it is the protection level that decides.
+            engine.service_key = Some(verified(&service));
+            let sealed = engine.service_envelopes_for("inbox");
+            if allowed {
+                assert_eq!(sealed.expect(name).len(), 1, "{name}");
+            } else {
+                assert_eq!(
+                    sealed.err(),
+                    Some(ClientError::ProtectionNotStandard),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_verified_standard_engine_with_no_service_key_still_seals_nothing() {
+        assert!(matches!(
+            standard_engine().service_envelopes_for("inbox"),
+            Err(ClientError::ServiceKeyNotVerified)
         ));
     }
 }

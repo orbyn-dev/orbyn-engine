@@ -14,6 +14,7 @@ impl Engine {
             trust: Trust::new(account, device_id.to_owned(), me),
             protection: protection::Protection::default(),
             service_key: None,
+            service_key_history_unknown: false,
             keys,
             zones: BTreeMap::new(),
             skipped_future_stamps: 0,
@@ -34,6 +35,11 @@ impl Engine {
             snapshot.protection_anchored,
             snapshot.protection_complete,
         )?;
+        match snapshot.service_key.as_ref() {
+            Some(held) => engine.service_key = Some(held.restore()?),
+            // An older snapshot: nothing says whether a key was ever verified.
+            None => engine.service_key_history_unknown = !snapshot.service_key_tracked,
+        }
         for (name, z) in snapshot.zones {
             let mut keys = BTreeMap::new();
             for (id, key) in &z.keys {
@@ -114,6 +120,8 @@ impl Engine {
             protection_floor: protection.floor,
             protection_anchored: protection.anchored,
             protection_complete: protection.complete,
+            service_key: self.service_key.as_ref().map(HeldServiceKey::from),
+            service_key_tracked: true,
             zones,
         }
     }

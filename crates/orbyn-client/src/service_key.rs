@@ -140,6 +140,12 @@ pub enum ServiceKeyRefusal {
     /// The certification the record server offered is not the newest one in the log.
     #[error("the offered certification is not the log's newest")]
     OfferedNotNewest,
+    /// This engine was restored from a snapshot made before it kept the service key, so it cannot
+    /// tell whether it ever verified one. Pass the key the host kept as `known_key`, or say there
+    /// is none with [`crate::Engine::confirm_service_key_first_use`]. Not a verdict about the
+    /// account.
+    #[error("whether this engine verified a service key earlier is unknown")]
+    HeldKeyUnknown,
 }
 
 impl ServiceKeyRefusal {
@@ -181,6 +187,7 @@ impl ServiceKeyRefusal {
             Self::UnpinnedIdentity => "unpinned_identity",
             Self::BadIdentitySignature => "bad_identity_signature",
             Self::OfferedNotNewest => "offered_not_newest",
+            Self::HeldKeyUnknown => "held_key_unknown",
         }
     }
 
@@ -196,6 +203,7 @@ impl ServiceKeyRefusal {
                 | Self::NeedsConsistency { .. }
                 | Self::TooManyPages
                 | Self::ClockAhead
+                | Self::HeldKeyUnknown
         )
     }
 }
@@ -463,9 +471,13 @@ impl crate::Engine {
     /// [`crate::Engine::service_envelopes_for`] seals zone keys to that key and no other; a
     /// refusal leaves the previous key, if any, in place.
     ///
-    /// `known_key` and `seen` default to the key and head this engine already holds, so a host that
-    /// omits them cannot fall back to trust on first use or to a head older than the one this
-    /// engine saw.
+    /// `known_key` and `seen` default to the key and head this engine already holds (and the
+    /// snapshot keeps them, so that holds after a restart), so a host that omits them cannot fall
+    /// back to trust on first use or to a head older than the one this engine saw. A `known_key`
+    /// that differs from the held one is [`ServiceKeyRefusal::KeyChanged`], and of two heads the
+    /// newer is used, so a host cannot move the engine to a different key or an older head.
+    /// An engine restored from a snapshot that predates the held key refuses with
+    /// [`ServiceKeyRefusal::HeldKeyUnknown`] until the host passes `known_key` or confirms first use.
     pub fn verify_service_key(
         &mut self,
         pins: &ServiceKeyPins,
@@ -476,19 +488,37 @@ impl crate::Engine {
         now_ms: u64,
     ) -> Result<VerifiedServiceKey, ServiceKeyRefusal> {
         let held = self.service_key.as_ref();
-        let known = known_key.or_else(|| held.map(|key| &key.public_key));
-        let seen = seen.or_else(|| held.map(|key| &key.seen));
+        if self.service_key_history_unknown && held.is_none() && known_key.is_none() {
+            return Err(ServiceKeyRefusal::HeldKeyUnknown);
+        }
+        let known = match (known_key, held) {
+            (Some(host), Some(held)) if *host != held.public_key => {
+                return Err(ServiceKeyRefusal::KeyChanged);
+            }
+            (Some(host), _) => Some(*host),
+            (None, Some(held)) => Some(held.public_key),
+            (None, None) => None,
+        };
+        let seen = crate::held_key::newer(seen, held.map(|key| &key.seen));
         let verified = verify_service_key(
             pins,
             self.trust.account,
             offered,
             answers,
-            known,
-            seen,
+            known.as_ref(),
+            seen.as_ref(),
             now_ms,
         )?;
         self.service_key = Some(verified.clone());
         Ok(verified)
+    }
+
+    /// The host says it has no earlier service key for this engine (an account that never had
+    /// one checked), after a restore from a snapshot that predates the held key: the next
+    /// [`crate::Engine::verify_service_key`] may then be the first use, which is trusted once and
+    /// kept. The host must make this call itself: it is never implied.
+    pub fn confirm_service_key_first_use(&mut self) {
+        self.service_key_history_unknown = false;
     }
 
     /// Whether this engine holds a service key that [`crate::Engine::verify_service_key`] accepted.
@@ -1118,5 +1148,206 @@ mod tests {
             forked.run(),
             Err(ServiceKeyRefusal::Log(log::Refusal::Fork))
         );
+    }
+
+    // ---- the held key survives a restart ----
+
+    const DEVICE: &str = "0000000a-0000-4000-8000-00000000000a";
+
+    fn fresh_engine() -> (crate::Engine, orbyn_crypto::DeviceKeys) {
+        let keys = orbyn_crypto::DeviceKeys::generate().expect("keys");
+        let copy = orbyn_crypto::DeviceKeys::from_bytes(keys.to_bytes().as_slice()).expect("copy");
+        (
+            crate::Engine::new(keys, &uuid(&ACCOUNT), DEVICE).expect("engine"),
+            copy,
+        )
+    }
+
+    impl Case {
+        fn run_on(
+            &self,
+            engine: &mut crate::Engine,
+            known: Option<&ServicePublicKey>,
+            seen: Option<&Seen>,
+        ) -> Result<VerifiedServiceKey, ServiceKeyRefusal> {
+            let lookup = self.lookup.to_string();
+            let pages: Vec<String> = self.pages.iter().map(Value::to_string).collect();
+            let page_refs: Vec<&str> = pages.iter().map(String::as_str).collect();
+            engine.verify_service_key(
+                &self.pins,
+                &self.offered,
+                &LogAnswers {
+                    lookup: &lookup,
+                    entry_pages: &page_refs,
+                    consistency: None,
+                },
+                known,
+                seen,
+                self.now,
+            )
+        }
+    }
+
+    /// The engine as a host restarts it: through the snapshot's JSON and back.
+    fn restart(
+        engine: &crate::Engine,
+        keys: &orbyn_crypto::DeviceKeys,
+        edit: impl FnOnce(&mut Value),
+    ) -> Result<crate::Engine, crate::ClientError> {
+        let mut json = serde_json::to_value(engine.snapshot()).expect("snapshot");
+        edit(&mut json);
+        let snapshot: crate::Snapshot = serde_json::from_value(json).expect("snapshot json");
+        let copy = orbyn_crypto::DeviceKeys::from_bytes(keys.to_bytes().as_slice()).expect("copy");
+        crate::Engine::restore(copy, snapshot, 0)
+    }
+
+    #[test]
+    fn a_restart_keeps_the_key_so_a_swapped_key_is_still_refused() {
+        let first = Case::new();
+        let (mut engine, keys) = fresh_engine();
+        first.run_on(&mut engine, None, None).expect("first use");
+        let mut restarted = restart(&engine, &keys, |_| {}).expect("restore");
+        assert!(restarted.has_verified_service_key());
+
+        // The host passes nothing, as after a restart: the held key still guards the account.
+        let swapped = Case::new();
+        assert_eq!(
+            swapped.run_on(&mut restarted, None, None).err(),
+            Some(ServiceKeyRefusal::KeyChanged)
+        );
+        // And the key that was verified is still accepted.
+        first.run_on(&mut restarted, None, None).expect("same key");
+    }
+
+    #[test]
+    fn a_host_cannot_name_another_key_to_get_a_swapped_key_accepted() {
+        let first = Case::new();
+        let (mut engine, _) = fresh_engine();
+        first.run_on(&mut engine, None, None).expect("first use");
+        // The host passes the swapped key as the one it knows: it agrees with the offer, but the
+        // engine holds another, so it is refused.
+        let swapped = Case::new();
+        assert_eq!(
+            swapped
+                .run_on(&mut engine, Some(&swapped.public), None)
+                .err(),
+            Some(ServiceKeyRefusal::KeyChanged)
+        );
+        // The held key is still the one that was verified.
+        assert!(engine.has_verified_service_key());
+        first
+            .run_on(&mut engine, Some(&first.public), None)
+            .expect("the held key named by the host");
+    }
+
+    #[test]
+    fn the_newer_of_the_held_head_and_the_hosts_is_used() {
+        let case = Case::new();
+        let (mut engine, _) = fresh_engine();
+        let verified = case.run_on(&mut engine, None, None).expect("first use");
+        let older = Seen {
+            size: 1,
+            log_root: [7; 32],
+            service_map_root: [7; 32],
+            identity_map_root: [7; 32],
+            witnessed_ms: 0,
+        };
+        // A host that passes an older head does not move the engine back to it: the held head
+        // is used, and the same log still verifies.
+        case.run_on(&mut engine, None, Some(&older))
+            .expect("the held head wins over an older one");
+        // A newer head from the host is used: the log shown is behind it.
+        let newer = Seen {
+            size: verified.seen.size + 5,
+            ..older
+        };
+        assert!(case.run_on(&mut engine, None, Some(&newer)).is_err());
+    }
+
+    #[test]
+    fn a_snapshot_with_no_held_key_never_falls_back_to_trust_on_first_use() {
+        let case = Case::new();
+        let (mut engine, keys) = fresh_engine();
+        case.run_on(&mut engine, None, None).expect("first use");
+        // The snapshot as an older engine wrote it: neither field exists.
+        let old = |json: &mut Value| {
+            let object = json.as_object_mut().expect("object");
+            object.remove("service_key");
+            object.remove("service_key_tracked");
+        };
+        let mut restarted = restart(&engine, &keys, old).expect("an older snapshot still loads");
+        assert!(!restarted.has_verified_service_key());
+        // It cannot tell whether a key was ever verified: the first check is refused, not trusted.
+        assert_eq!(
+            case.run_on(&mut restarted, None, None).err(),
+            Some(ServiceKeyRefusal::HeldKeyUnknown)
+        );
+        assert!(!ServiceKeyRefusal::HeldKeyUnknown.is_takeover());
+        assert_eq!(ServiceKeyRefusal::HeldKeyUnknown.code(), "held_key_unknown");
+        assert!(!restarted.has_verified_service_key());
+        // The host's own copy of the key is honoured (a different key is the takeover it was)...
+        let swapped = Case::new();
+        assert_eq!(
+            swapped
+                .run_on(&mut restarted, Some(&case.public), None)
+                .err(),
+            Some(ServiceKeyRefusal::KeyChanged)
+        );
+        case.run_on(&mut restarted, Some(&case.public), None)
+            .expect("the key the host kept");
+        // ...or the host says, in its own call, that it has none.
+        let mut again = restart(&engine, &keys, old).expect("restore");
+        again.confirm_service_key_first_use();
+        case.run_on(&mut again, None, None)
+            .expect("confirmed first use");
+        assert!(again.has_verified_service_key());
+    }
+
+    #[test]
+    fn a_snapshot_that_knows_it_holds_no_key_allows_the_first_use() {
+        let (engine, keys) = fresh_engine();
+        // Written by this version: `service_key_tracked` is true and there is no key.
+        let mut restarted = restart(&engine, &keys, |_| {}).expect("restore");
+        Case::new()
+            .run_on(&mut restarted, None, None)
+            .expect("a new account's first use");
+    }
+
+    #[test]
+    fn a_held_key_that_is_not_what_it_should_be_refuses_the_snapshot() {
+        let (mut engine, keys) = fresh_engine();
+        Case::new().run_on(&mut engine, None, None).expect("verify");
+        for (field, bad) in [
+            ("public_key", Value::from("AAAA")),
+            ("statement_hash", Value::from("not base64 !")),
+        ] {
+            let result = restart(&engine, &keys, |json| {
+                json["service_key"][field] = bad;
+            });
+            assert!(result.is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn the_held_key_prints_no_key_material() {
+        let (mut engine, _) = fresh_engine();
+        let verified = Case::new().run_on(&mut engine, None, None).expect("verify");
+        let snapshot = engine.snapshot();
+        let held = snapshot.service_key.as_ref().expect("held");
+        for printed in [
+            format!("{held:?}"),
+            format!("{held:#?}"),
+            format!("{snapshot:?}"),
+            format!("{snapshot:#?}"),
+        ] {
+            for key in [
+                URL_SAFE_NO_PAD.encode(verified.public_key),
+                h(&verified.public_key),
+                URL_SAFE_NO_PAD.encode(verified.statement_hash),
+                URL_SAFE_NO_PAD.encode(verified.seen.log_root),
+            ] {
+                assert!(!printed.contains(&key), "{printed}");
+            }
+        }
     }
 }
