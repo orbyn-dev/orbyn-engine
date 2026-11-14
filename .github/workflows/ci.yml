@@ -31,7 +31,12 @@ jobs:
   # and manual runs, and any path this does not recognise, run everything.
   changes:
     name: Changes
-    runs-on: ubuntu-24.04
+    # Runs on the organisation's self-hosted runners only when the repository variable CI_RUNNER is 'local'; with it
+    # unset this is `ubuntu-24.04`, as before. This check sends our own fork pull requests to hosted runners; the real
+    # boundary is a private repository plus the runner group, because a fork's pull request runs its own copy of this
+    # file and can name any runner. The same line is on every job that moved (`changes`, `lint`, `audit`). Docker,
+    # service containers, macOS and Windows stay hosted.
+    runs-on: ${{ vars.CI_RUNNER == 'local' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","orbyn-local"]') || 'ubuntu-24.04' }}
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       platform: ${{ steps.scope.outputs.platform }}
@@ -84,7 +89,8 @@ jobs:
   lint:
     name: Cheap checks
     needs: changes
-    runs-on: ubuntu-24.04
+    # Local runners behind CI_RUNNER, never for a fork pull request: see `changes`.
+    runs-on: ${{ vars.CI_RUNNER == 'local' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","orbyn-local"]') || 'ubuntu-24.04' }}
     env:
       RUST: ${{ needs.changes.outputs.rust }}
       MIGRATIONS: ${{ needs.changes.outputs.migrations }}
@@ -257,7 +263,8 @@ jobs:
     name: Security audit
     needs: [changes, lint]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    # Local runners behind CI_RUNNER, never for a fork pull request: see `changes`.
+    runs-on: ${{ vars.CI_RUNNER == 'local' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","orbyn-local"]') || 'ubuntu-24.04' }}
     env:
       RUN: ${{ needs.changes.outputs.audit }}
     steps:
@@ -277,11 +284,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # `cargo audit` is a cargo subcommand, so cargo must exist. The hosted image has it; a self-hosted runner does not.
+      - if: env.RUN == 'true'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - if: env.RUN == 'true'
         uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: cargo-audit
+      # The audit reads Cargo.lock only, so it needs any cargo: not the pinned toolchain's components and wasm target.
       - if: env.RUN == 'true'
+        env:
+          RUSTUP_TOOLCHAIN: stable
         run: cargo audit
 
   # The image builds without a layer cache (the Dockerfile's cache mounts do not survive a runner), so it is the slowest
