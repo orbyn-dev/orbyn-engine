@@ -2,7 +2,7 @@
 # One image for every server role: `orbyn serve`, `orbyn worker`, `orbyn migrate`.
 # Build from the repository root: docker build -f docker/Dockerfile -t orbyn-engine .
 
-FROM rust:1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS build
+FROM rust:1-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS build
 WORKDIR /src
 COPY . .
 # Cache mounts keep the registry and target between builds, so only changed
