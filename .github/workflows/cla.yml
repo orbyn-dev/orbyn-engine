@@ -17,5 +17,7 @@ jobs:
     uses: orbyn-dev/.github/.github/workflows/cla.yml@59d7fc7d24c490fd855c424de192638ee7e35d4d
     with:
       agreement-version: "0.1"
+      # Account ids that never need to agree: Anh, dependabot, github-actions and coderabbitai[bot] (a review bot).
+      allowed: "63905487,49699333,41898282,136622811"
     secrets:
       signatures-token: ${{ secrets.CLA_SIGNATURES_TOKEN }}
