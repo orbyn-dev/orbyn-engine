@@ -5,7 +5,7 @@
 # This image holds SoftHSM, a software token, so that a smoke test needs no hardware. A real
 # deployment mounts its HSM's PKCS#11 module and does not use this image as it is.
 
-FROM rust:1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS build
+FROM rust:1-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS build
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
